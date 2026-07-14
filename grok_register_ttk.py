@@ -65,6 +65,8 @@ DEFAULT_CONFIG = {
     "inboxkitten_api_base": "https://inboxkitten.com/api/v1/mail",
     "inboxkitten_domain": "inboxkitten.com",
     "proxy": "http://127.0.0.1:7890",
+    # 代理失败时是否回退直连（本地版默认关闭，避免直连拿不到 grok SSO）
+    "allow_proxy_fallback": False,
     "enable_nsfw": True,
     "register_count": 1,
     "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36",
@@ -2578,22 +2580,33 @@ def open_signup_page(log_callback=None, cancel_callback=None):
             page = browser.new_tab(SIGNUP_URL)
         page.wait.doc_loaded()
 
+    allow_fallback = bool(config.get("allow_proxy_fallback", False))
+
     try:
         _open_with_current_browser()
     except Exception as e:
-        if browser_started_with_proxy and get_configured_proxy():
+        if browser_started_with_proxy and get_configured_proxy() and allow_fallback:
             if log_callback:
                 log_callback(f"[!] 浏览器代理访问注册页失败，自动回退直连: {e}")
             restart_browser(log_callback=log_callback, use_proxy=False)
             _open_with_current_browser()
         else:
+            if browser_started_with_proxy and get_configured_proxy() and not allow_fallback:
+                raise Exception(
+                    f"浏览器经代理打开注册页失败（已关闭直连回退，请检查 Clash 是否监听 7890）: {e}"
+                ) from e
             raise
 
     if browser_started_with_proxy and page_has_proxy_error(page):
-        if log_callback:
-            log_callback("[!] 浏览器页面显示代理错误，自动回退直连")
-        restart_browser(log_callback=log_callback, use_proxy=False)
-        _open_with_current_browser()
+        if allow_fallback:
+            if log_callback:
+                log_callback("[!] 浏览器页面显示代理错误，自动回退直连")
+            restart_browser(log_callback=log_callback, use_proxy=False)
+            _open_with_current_browser()
+        else:
+            raise Exception(
+                "浏览器页面显示代理错误（已关闭直连回退）。请先打开 Clash，确认 mixed/HTTP 端口为 7890，并选好可用节点。"
+            )
 
     sleep_with_cancel(2, cancel_callback)
     if log_callback:
@@ -3493,6 +3506,97 @@ return document.cookie.split(';').some(c => c.trim().startsWith('sso='));
     return False
 
 
+def dismiss_cookie_and_consent_banners(log_callback=None):
+    """Click OneTrust / cookie consent / continue buttons that block SSO landing."""
+    global page
+    if page is None:
+        return ""
+    try:
+        result = page.run_js(
+            r"""
+function isVisible(node) {
+  if (!node) return false;
+  const style = window.getComputedStyle(node);
+  if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) === 0) return false;
+  const rect = node.getBoundingClientRect();
+  return rect.width > 0 && rect.height > 0;
+}
+function textOf(node) {
+  return [
+    node.innerText,
+    node.textContent,
+    node.getAttribute('value'),
+    node.getAttribute('aria-label'),
+    node.getAttribute('title'),
+  ].filter(Boolean).join(' ').replace(/\s+/g, ' ').trim();
+}
+// Prefer known OneTrust / cookie SDK ids
+const idCandidates = [
+  'onetrust-accept-btn-handler',
+  'accept-recommended-btn-handler',
+  'onetrust-reject-all-handler',
+];
+for (const id of idCandidates) {
+  const el = document.getElementById(id);
+  if (el && isVisible(el) && id.includes('accept')) {
+    el.click();
+    return 'clicked-id:' + id;
+  }
+}
+const needles = [
+  '接受所有 cookie',
+  '接受所有cookie',
+  '接受全部 cookie',
+  '接受全部cookie',
+  '全部接受',
+  '接受全部',
+  '同意全部',
+  '同意并继续',
+  'allow all',
+  'accept all',
+  'accept all cookies',
+  'accept cookies',
+  'i agree',
+  'got it',
+  '继续',
+  'continue',
+];
+const nodes = Array.from(document.querySelectorAll(
+  'button, [role="button"], input[type="button"], input[type="submit"], a'
+)).filter(isVisible);
+for (const node of nodes) {
+  const t = textOf(node).toLowerCase().replace(/\s+/g, '');
+  if (!t) continue;
+  for (const n of needles) {
+    const nn = n.toLowerCase().replace(/\s+/g, '');
+    if (t.includes(nn)) {
+      // avoid rejecting all when accept is available
+      if (nn.includes('拒绝') || nn.includes('reject') || nn.includes('deny')) continue;
+      node.click();
+      return 'clicked-text:' + textOf(node).slice(0, 40);
+    }
+  }
+}
+// Chinese exact-ish: 接受所有 Cookie (mixed case / spacing)
+for (const node of nodes) {
+  const raw = textOf(node);
+  if (/接受\s*所有\s*Cookie/i.test(raw) || /Accept\s*All/i.test(raw)) {
+    node.click();
+    return 'clicked-regex:' + raw.slice(0, 40);
+  }
+}
+return '';
+"""
+        )
+        if result and log_callback:
+            log_callback(f"[*] 已处理同意/Cookie 弹窗: {result}")
+        return result or ""
+    except Exception as e:
+        if log_callback:
+            log_callback(f"[Debug] 处理 Cookie 弹窗失败: {e}")
+        return ""
+
+
 def wait_for_sso_cookie(
     timeout=120,
     log_callback=None,
@@ -3508,6 +3612,7 @@ def wait_for_sso_cookie(
     last_seen_names = set()
     last_submit_retry = 0.0
     last_cf_retry_at = 0.0
+    last_consent_retry = 0.0
     final_no_submit_state = ""
     final_no_submit_since = None
     final_no_submit_timeout = 25
@@ -3523,8 +3628,13 @@ def wait_for_sso_cookie(
                 sleep_with_cancel(1, cancel_callback)
                 continue
 
-            # 仍停留在“完成注册”页时，若 Cloudflare 已通过，周期性重试点击提交
             now = time.time()
+            # Cookie / “您正在登录” 同意墙：不点就永远没有 sso
+            if now - last_consent_retry >= 1.5:
+                dismiss_cookie_and_consent_banners(log_callback=log_callback)
+                last_consent_retry = now
+
+            # 仍停留在“完成注册”页时，若 Cloudflare 已通过，周期性重试点击提交
             if now - last_submit_retry >= 2.5:
                 retried = page.run_js(
                     r"""
