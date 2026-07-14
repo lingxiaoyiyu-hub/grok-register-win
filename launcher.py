@@ -98,16 +98,29 @@ def wait_health(timeout: float = 20.0) -> bool:
 
 
 def main() -> int:
+    try:
+        return _main_impl()
+    except SystemExit:
+        raise
+    except Exception as e:
+        log(f"[FATAL] {type(e).__name__}: {e}")
+        import traceback
+
+        traceback.print_exc()
+        return 1
+
+
+def _main_impl() -> int:
     os.chdir(ROOT)
     ensure_dirs()
     cfg = ensure_config()
     proxy = str(cfg.get("proxy") or "http://127.0.0.1:7890").strip()
     log("========== Grok Register Win ==========")
-    log(f"目录: {ROOT}")
+    log(f"Dir: {ROOT}")
     log(f"Python: {python_bin()}")
-    log(f"代理: {proxy}")
-    log(f"面板: http://{PANEL_HOST}:{PANEL_PORT}  密码: {PANEL_PASSWORD}")
-    log("节点/订阅请在本机 Clash 客户端管理，本工具不内置 Clash。")
+    log(f"Proxy: {proxy}")
+    log(f"Panel: http://{PANEL_HOST}:{PANEL_PORT}  password: {PANEL_PASSWORD}")
+    log("Use your own Clash for subscription/nodes. This app does not embed Clash.")
     log("======================================")
     check_proxy(proxy)
 
@@ -122,33 +135,63 @@ def main() -> int:
     env["PANEL_LOG_DIR"] = str(ROOT / "data" / "logs")
     env["GROK_PYTHON"] = python_bin()
     env["PYTHONUNBUFFERED"] = "1"
-    # optional clash external controller for node dropdown
     env.setdefault("CLASH_API", "http://127.0.0.1:9090")
     env.setdefault("ENABLE_CLASH_UI", "1")
 
-    cmd = [python_bin(), str(ROOT / "panel" / "app.py")]
-    log(f"[*] 启动面板: {' '.join(cmd)}")
-    proc = subprocess.Popen(cmd, cwd=str(ROOT), env=env)
+    panel_py = ROOT / "panel" / "app.py"
+    if not panel_py.exists():
+        log(f"[FATAL] missing {panel_py}")
+        return 1
 
-    if wait_health():
+    cmd = [python_bin(), str(panel_py)]
+    log(f"[*] start panel: {' '.join(cmd)}")
+    panel_log = ROOT / "data" / "logs" / "panel_boot.log"
+    try:
+        boot_f = open(panel_log, "w", encoding="utf-8", errors="replace")
+    except Exception:
+        boot_f = subprocess.DEVNULL
+
+    proc = subprocess.Popen(
+        cmd,
+        cwd=str(ROOT),
+        env=env,
+        stdout=boot_f,
+        stderr=subprocess.STDOUT,
+    )
+
+    if wait_health(25.0):
         url = f"http://{PANEL_HOST}:{PANEL_PORT}/"
-        log(f"[+] 面板已就绪: {url}")
+        log(f"[+] panel ready: {url}")
         try:
             webbrowser.open(url)
+        except Exception as e:
+            log(f"[!] open browser failed: {e}")
+    else:
+        log("[!] panel health check timeout")
+        log(f"[!] see {panel_log}")
+        try:
+            if panel_log.exists():
+                log("--- panel_boot.log ---")
+                log(panel_log.read_text(encoding="utf-8", errors="replace")[-3000:])
         except Exception:
             pass
-    else:
-        log("[!] 面板启动超时，请看上方报错")
+        if proc.poll() is not None:
+            log(f"[!] panel process exited early: code={proc.returncode}")
+            return int(proc.returncode or 1)
 
-    log("[*] 关闭本窗口将停止面板（Ctrl+C 也可）")
+    log("[*] keep this window open. Ctrl+C to stop.")
     try:
-        return proc.wait()
+        return int(proc.wait() or 0)
     except KeyboardInterrupt:
-        log("\n[*] 正在退出…")
+        log("\n[*] stopping...")
         try:
             proc.terminate()
+            proc.wait(timeout=5)
         except Exception:
-            pass
+            try:
+                proc.kill()
+            except Exception:
+                pass
         return 0
 
 

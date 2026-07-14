@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Grok Register 账号面板 + 启动注册 + Clash 节点选择/失败轮换"""
+"""Grok Register 账号面板 + 启动注册（代理/节点由本机 Clash 管理）"""
 
 from __future__ import annotations
 
@@ -791,7 +791,9 @@ def _next_node(nodes: List[str], index: int) -> Tuple[str, int]:
     return nodes[index], index
 
 
-def job_worker(count: int, node: str, node_mode: str, node_list: List[str]):
+def job_worker(count: int, node: str = "", node_mode: str = "fixed", node_list: Optional[List[str]] = None):
+    """Run register rounds. Node switching is intentionally not managed here —
+    user selects nodes in their own Clash client."""
     global _job
     try:
         with _job_lock:
@@ -802,35 +804,15 @@ def job_worker(count: int, node: str, node_mode: str, node_list: List[str]):
             _job["success"] = 0
             _job["fail"] = 0
             _job["current_round"] = 0
-            _job["node_mode"] = node_mode
-            _job["node_list"] = node_list
+            _job["node_mode"] = "external"
+            _job["node_list"] = []
+            _job["current_node"] = "external-clash"
             _job["started_at"] = datetime.now().isoformat(timespec="seconds")
             _job["finished_at"] = None
             _job["last_error"] = ""
 
-        # pick starting node
-        nodes = node_list[:] if node_list else []
-        if not nodes:
-            info = clash_list_nodes()
-            nodes = [n["name"] for n in info.get("nodes") or []]
-        if node and node in nodes:
-            idx = nodes.index(node)
-            current = node
-        elif nodes:
-            idx = 0
-            current = nodes[0]
-        else:
-            idx = 0
-            current = node or ""
-
-        if current:
-            ok, msg = clash_set_node(current)
-            log_line(f"[Clash] {msg}")
-            log_line(f"[Clash] 出口: {clash_exit_ip()}")
-        with _job_lock:
-            _job["current_node"] = current
-            _job["node_index"] = idx
-            _job["node_list"] = nodes
+        log_line(f"[*] 使用外部 Clash 代理: {PROXY_URL}（节点请在 Clash 客户端选择）")
+        log_line(f"[*] 出口探测: {clash_exit_ip()}")
 
         for i in range(1, count + 1):
             if _job.get("stop"):
@@ -839,16 +821,6 @@ def job_worker(count: int, node: str, node_mode: str, node_list: List[str]):
 
             with _job_lock:
                 _job["current_round"] = i
-                _job["current_node"] = current
-
-            if node_mode == "rotate_each" and i > 1 and nodes:
-                current, idx = _next_node(nodes, idx)
-                ok, msg = clash_set_node(current)
-                log_line(f"[Clash] 每轮轮换: {msg}")
-                log_line(f"[Clash] 出口: {clash_exit_ip()}")
-                with _job_lock:
-                    _job["current_node"] = current
-                    _job["node_index"] = idx
 
             before_lines = account_line_set()
             ok = _run_one_round(i, count)
@@ -856,15 +828,12 @@ def job_worker(count: int, node: str, node_mode: str, node_list: List[str]):
                 with _job_lock:
                     _job["success"] = int(_job.get("success") or 0) + 1
                 log_line(f"[+] 第 {i} 轮成功（累计成功 {_job['success']}）")
-                # 注册成功后自动入队转真 CPA (OAuth JSON)
                 if AUTO_CPA:
-                    # wait a moment for accounts_*.txt flush
                     time.sleep(0.8)
                     queued = enqueue_new_accounts(before_lines)
                     if queued:
                         log_line(f"[CPA] 本轮新账号入队转换: {queued}")
                     else:
-                        # fallback: queue any not-yet-converted latest accounts
                         queued2 = enqueue_missing_accounts(limit=3)
                         if queued2:
                             log_line(f"[CPA] 未匹配到新行，补队最近未转换: {queued2}")
@@ -874,14 +843,6 @@ def job_worker(count: int, node: str, node_mode: str, node_list: List[str]):
                 with _job_lock:
                     _job["fail"] = int(_job.get("fail") or 0) + 1
                 log_line(f"[-] 第 {i} 轮失败（累计失败 {_job['fail']}），继续下一轮")
-                if node_mode == "rotate_on_fail" and nodes and not _job.get("stop"):
-                    current, idx = _next_node(nodes, idx)
-                    cok, cmsg = clash_set_node(current)
-                    log_line(f"[Clash] 失败自动换节点: {cmsg}")
-                    log_line(f"[Clash] 出口: {clash_exit_ip()}")
-                    with _job_lock:
-                        _job["current_node"] = current
-                        _job["node_index"] = idx
 
             time.sleep(1)
 
@@ -901,35 +862,22 @@ def job_worker(count: int, node: str, node_mode: str, node_list: List[str]):
             _job["pid"] = None
 
 
-def start_job(count: int, node: str, node_mode: str) -> Tuple[bool, str]:
+def start_job(count: int, node: str = "", node_mode: str = "fixed") -> Tuple[bool, str]:
     with _job_lock:
         if _job.get("running"):
             return False, "已有任务在运行"
     if count < 1 or count > 500:
         return False, "轮数范围 1-500"
-    if node_mode not in ("fixed", "rotate_on_fail", "rotate_each"):
-        node_mode = "rotate_on_fail"
-
-    info = clash_list_nodes() if ENABLE_CLASH_UI else {"nodes": []}
-    nodes = [n["name"] for n in info.get("nodes") or []]
-    if node and nodes and node not in nodes:
-        # external clash: allow starting even if API node list empty/mismatch
-        if info.get("ok"):
-            return False, f"节点不可用或不存在: {node}"
-        log_line(f"[!] Clash API 不可用，忽略节点名校验，使用外部代理 {PROXY_URL}")
 
     log_path = LOG_DIR / f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
     with _job_lock:
         _job["log_path"] = str(log_path)
     _logs.clear()
-    log_line(
-        f"任务创建：轮数={count} 节点={node or '外部Clash自选'} 模式={node_mode} "
-        f"可用节点={len(nodes)} proxy={PROXY_URL}"
-    )
+    log_line(f"任务创建：轮数={count} proxy={PROXY_URL}（节点由本机 Clash 管理）")
 
     th = threading.Thread(
         target=job_worker,
-        args=(count, node, node_mode, nodes),
+        args=(count,),
         daemon=True,
     )
     th.start()
@@ -997,7 +945,7 @@ LOGIN_HTML = """
 <body>
 <form class="card" method="post">
   <h1>Grok Register</h1>
-  <p>账号面板 · 启动注册 · 节点管理</p>
+  <p>账号面板 · 启动注册 · 外置 Clash 代理</p>
   <input type="password" name="password" placeholder="面板密码" autofocus required/>
   {% if error %}<div class="err">{{ error }}</div>{% endif %}
   <button type="submit">进入</button>
@@ -1068,7 +1016,6 @@ INDEX_HTML = r"""
     <div class="stat"><div class="k">CPA 队列</div><div class="v" style="font-size:16px" id="st_cpa_q">0 / 0 / 0</div></div>
     <div class="stat"><div class="k">任务状态</div><div class="v" style="font-size:16px"><span class="dot" id="st_dot"></span><span id="st_status">idle</span></div></div>
     <div class="stat"><div class="k">注册 成功/失败</div><div class="v" style="font-size:16px"><span id="st_sf">0 / 0</span></div></div>
-    <div class="stat"><div class="k">当前节点</div><div class="v" style="font-size:14px" id="st_node">-</div></div>
   </div>
 
   <div class="card">
@@ -1077,27 +1024,12 @@ INDEX_HTML = r"""
       <label>轮数
         <input type="number" id="count" min="1" max="500" value="1"/>
       </label>
-      <label>节点
-        <select id="node"></select>
-      </label>
-      <label>节点策略
-        <select id="node_mode">
-          <option value="rotate_on_fail" selected>失败自动换节点（推荐）</option>
-          <option value="fixed">固定节点</option>
-          <option value="rotate_each">每轮换节点</option>
-        </select>
-      </label>
       <button class="btn ok" id="btn_start" onclick="startJob()">▶ 开始注册</button>
       <button class="btn danger" id="btn_stop" onclick="stopJob()">■ 停止</button>
-      <button class="btn" onclick="refreshNodes()">刷新节点</button>
-      <button class="btn" onclick="applyNode()">仅切换节点</button>
       <button class="btn" onclick="backfillCpa()" title="把尚未转成 CPA 的历史 SSO 入队">补转未转换 CPA</button>
     </div>
-    <div class="muted" style="margin-top:10px;font-size:12px" id="node_hint">
-      节点列表来自本机 Clash API（9090，可选）。没有 API 时请在 Clash 客户端里自己选节点，然后直接点开始注册。
-    </div>
-    <div class="muted" style="margin-top:6px;font-size:12px" id="cpa_hint">
-      代理默认 http://127.0.0.1:7890（config.json 的 proxy）。注册成功自动转 CPA。下载：SSO(TXT) / CPA(JSON)。
+    <div class="muted" style="margin-top:10px;font-size:12px" id="cpa_hint">
+      代理走本机 Clash（默认 http://127.0.0.1:7890，见 config.json）。节点请在 Clash 客户端里选择/更新订阅。注册成功后自动转 CPA。
     </div>
   </div>
 
@@ -1139,42 +1071,11 @@ async function api(url, opt){
   if(!r.ok) throw new Error(j.error||r.statusText||'request failed');
   return j;
 }
-async function refreshNodes(){
-  try{
-    const j = await api('/api/nodes');
-    const sel = document.getElementById('node');
-    const cur = j.global_now || j.main_now || '';
-    sel.innerHTML = '';
-    (j.nodes||[]).forEach(n=>{
-      const o=document.createElement('option');
-      o.value=n.name; o.textContent=n.name+(n.name===cur?' (当前)':'');
-      if(n.name===cur) o.selected=true;
-      sel.appendChild(o);
-    });
-    if(!sel.options.length){
-      const o=document.createElement('option'); o.value=''; o.textContent='(无可用节点)'; sel.appendChild(o);
-    }
-    document.getElementById('node_hint').textContent =
-      `Clash 模式: ${j.mode||'-'} · 当前 GLOBAL: ${j.global_now||'-'} · 可用非港节点: ${(j.nodes||[]).length}`;
-  }catch(e){
-    document.getElementById('node_hint').textContent = '节点加载失败: '+e.message;
-  }
-}
-async function applyNode(){
-  const node=document.getElementById('node').value;
-  try{
-    const j=await api('/api/nodes/select',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({node})});
-    toast(j.message||'已切换');
-    refreshNodes();
-  }catch(e){toast('切换失败: '+e.message)}
-}
 async function startJob(){
   const count=parseInt(document.getElementById('count').value||'1',10);
-  const node=document.getElementById('node').value;
-  const node_mode=document.getElementById('node_mode').value;
   try{
     const j=await api('/api/job/start',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({count,node,node_mode})});
+      body:JSON.stringify({count})});
     toast(j.message||'已启动');
     poll();
   }catch(e){toast('启动失败: '+e.message)}
@@ -1201,7 +1102,6 @@ async function poll(){
     document.getElementById('st_status').textContent=st.status||'idle';
     document.getElementById('st_dot').className='dot'+(st.running?' run':'');
     document.getElementById('st_sf').textContent=`${st.success||0} / ${st.fail||0}`;
-    document.getElementById('st_node').textContent=st.current_node||'-';
     document.getElementById('btn_start').disabled=!!st.running;
     if(document.getElementById('st_cpa_ok')){
       document.getElementById('st_cpa_ok').textContent=String(cpa.files||0);
@@ -1215,7 +1115,7 @@ async function poll(){
       const last = cpa.last_ok_email ? (' · 最近OK: '+cpa.last_ok_email) : '';
       const err = cpa.last_error ? (' · 最近错: '+cpa.last_error) : '';
       document.getElementById('cpa_hint').textContent =
-        `自动CPA: ${cpa.enabled?'开':'关'} · ${core} · 文件 ${cpa.files||0}${last}${err}`;
+        `代理走本机 Clash · 自动CPA: ${cpa.enabled?'开':'关'} · ${core} · 文件 ${cpa.files||0}${last}${err}`;
     }
     const box=document.getElementById('logbox');
     const logs=j.logs||[];
@@ -1226,7 +1126,6 @@ async function poll(){
     }
   }catch(e){}
 }
-refreshNodes();
 poll();
 setInterval(poll, 2000);
 </script>
@@ -1571,9 +1470,7 @@ def api_job_start():
         count = int(data.get("count") or 1)
     except Exception:
         count = 1
-    node = str(data.get("node") or "").strip()
-    node_mode = str(data.get("node_mode") or "rotate_on_fail").strip()
-    ok, msg = start_job(count, node, node_mode)
+    ok, msg = start_job(count)
     if not ok:
         return jsonify({"ok": False, "error": msg}), 400
     return jsonify({"ok": True, "message": msg})
