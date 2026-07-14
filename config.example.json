@@ -8,7 +8,6 @@
   "email_failover": true,
   "email_providers": [
     "tempmailer",
-    "inboxkitten",
     "duckmail",
     "yyds",
     "cloudflare"
@@ -18,8 +17,6 @@
   "tempmailer_domains": [
     "bluenode.cc"
   ],
-  "inboxkitten_api_base": "https://inboxkitten.com/api/v1/mail",
-  "inboxkitten_domain": "inboxkitten.com",
   "duckmail_api_key": "",
   "cloudflare_api_base": "",
   "cloudflare_api_key": "",

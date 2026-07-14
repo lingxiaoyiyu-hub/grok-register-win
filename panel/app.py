@@ -516,10 +516,13 @@ def email_config_public(cfg: Optional[dict] = None) -> dict:
     """Email settings for panel UI (custom maps to cloudflare_* backend)."""
     c = cfg if isinstance(cfg, dict) else load_config()
     provider = str(c.get("email_provider") or "tempmailer").strip().lower()
+    # inboxkitten.com 已被 xAI 拒绝，旧配置自动映射为 tempmailer
+    if provider in ("inboxkitten", "inbox_kitten"):
+        provider = "tempmailer"
     if provider == "cloudflare":
         ui_provider = "custom"
-    elif provider in ("tempmailer", "inboxkitten"):
-        ui_provider = provider
+    elif provider == "tempmailer":
+        ui_provider = "tempmailer"
     else:
         # unknown / unpaid providers -> show as custom if base set, else tempmailer
         ui_provider = "custom" if c.get("cloudflare_api_base") else "tempmailer"
@@ -527,7 +530,6 @@ def email_config_public(cfg: Optional[dict] = None) -> dict:
         "provider": ui_provider,
         "email_failover": bool(c.get("email_failover", True)),
         "tempmailer_domain": str(c.get("tempmailer_domain") or c.get("defaultDomains") or "").strip(),
-        "inboxkitten_domain": str(c.get("inboxkitten_domain") or "inboxkitten.com").strip(),
         "custom_api_base": str(c.get("cloudflare_api_base") or "").strip(),
         "custom_api_key": str(c.get("cloudflare_api_key") or "").strip(),
         "custom_auth_mode": (
@@ -545,8 +547,9 @@ def email_config_public(cfg: Optional[dict] = None) -> dict:
         ).strip(),
         "custom_path_token": str(c.get("cloudflare_path_token") or "/api/token").strip(),
         "hint": (
+            "内置仅 Tempmailer（bluenode.cc 等）。"
+            "InboxKitten 域名已被 xAI 拒绝，已从选项中移除。"
             "自定义：对接自建临时邮箱 API（兼容 cloudflare_temp_email）。"
-            "需提供可「创建地址」和「收信读验证码」的接口。"
         ),
     }
 
@@ -555,8 +558,10 @@ def apply_email_config_from_ui(data: dict) -> dict:
     """Merge panel email form into config.json and return public view."""
     cfg = load_config()
     provider = str(data.get("provider") or "tempmailer").strip().lower()
-    if provider not in ("tempmailer", "inboxkitten", "custom"):
-        raise ValueError("provider 必须是 tempmailer / inboxkitten / custom")
+    if provider in ("inboxkitten", "inbox_kitten"):
+        provider = "tempmailer"
+    if provider not in ("tempmailer", "custom"):
+        raise ValueError("provider 必须是 tempmailer / custom")
 
     cfg["email_failover"] = bool(data.get("email_failover", True))
 
@@ -566,16 +571,7 @@ def apply_email_config_from_ui(data: dict) -> dict:
         cfg["tempmailer_domain"] = domain
         cfg["tempmailer_domains"] = [domain] if domain else cfg.get("tempmailer_domains") or []
         cfg["defaultDomains"] = domain or cfg.get("defaultDomains") or ""
-        # failover only among free built-ins unless custom also configured
-        chain = ["tempmailer", "inboxkitten"]
-        if str(cfg.get("cloudflare_api_base") or "").strip():
-            chain.append("cloudflare")
-        cfg["email_providers"] = chain
-    elif provider == "inboxkitten":
-        cfg["email_provider"] = "inboxkitten"
-        domain = str(data.get("inboxkitten_domain") or "inboxkitten.com").strip()
-        cfg["inboxkitten_domain"] = domain or "inboxkitten.com"
-        chain = ["inboxkitten", "tempmailer"]
+        chain = ["tempmailer"]
         if str(cfg.get("cloudflare_api_base") or "").strip():
             chain.append("cloudflare")
         cfg["email_providers"] = chain
@@ -606,9 +602,8 @@ def apply_email_config_from_ui(data: dict) -> dict:
         cfg["cloudflare_path_token"] = str(
             data.get("custom_path_token") or "/api/token"
         ).strip() or "/api/token"
-        # custom only in chain unless failover wants built-ins too
         if cfg.get("email_failover"):
-            cfg["email_providers"] = ["cloudflare", "tempmailer", "inboxkitten"]
+            cfg["email_providers"] = ["cloudflare", "tempmailer"]
         else:
             cfg["email_providers"] = ["cloudflare"]
 
@@ -1189,7 +1184,6 @@ INDEX_HTML = r"""
       <label>邮箱源
         <select id="email_provider" onchange="onEmailProviderChange()">
           <option value="tempmailer">Tempmailer（内置免 key）</option>
-          <option value="inboxkitten">InboxKitten（内置免 key）</option>
           <option value="custom">自定义（自建临时邮 API）</option>
         </select>
       </label>
@@ -1201,9 +1195,6 @@ INDEX_HTML = r"""
     <div class="row" id="email_builtin_extra" style="margin-top:8px">
       <label id="lbl_temp_domain">Tempmailer 域名
         <input type="text" id="tempmailer_domain" placeholder="bluenode.cc"/>
-      </label>
-      <label id="lbl_ik_domain" style="display:none">InboxKitten 域名
-        <input type="text" id="inboxkitten_domain" placeholder="inboxkitten.com"/>
       </label>
     </div>
     <div id="email_custom_box" style="display:none;margin-top:10px">
@@ -1304,26 +1295,23 @@ function onEmailProviderChange(){
   const p=document.getElementById('email_provider').value;
   const custom=document.getElementById('email_custom_box');
   const builtin=document.getElementById('email_builtin_extra');
-  const lblT=document.getElementById('lbl_temp_domain');
-  const lblI=document.getElementById('lbl_ik_domain');
   if(p==='custom'){
     custom.style.display='block';
     builtin.style.display='none';
   }else{
     custom.style.display='none';
     builtin.style.display='flex';
-    lblT.style.display=p==='tempmailer'?'flex':'none';
-    lblI.style.display=p==='inboxkitten'?'flex':'none';
   }
 }
 async function loadEmailConfig(){
   try{
     const j=await api('/api/config/email');
     const e=j.email||{};
-    document.getElementById('email_provider').value=e.provider||'tempmailer';
+    let prov=e.provider||'tempmailer';
+    if(prov==='inboxkitten') prov='tempmailer';
+    document.getElementById('email_provider').value=prov;
     document.getElementById('email_failover').checked=!!e.email_failover;
     document.getElementById('tempmailer_domain').value=e.tempmailer_domain||'';
-    document.getElementById('inboxkitten_domain').value=e.inboxkitten_domain||'inboxkitten.com';
     document.getElementById('custom_api_base').value=e.custom_api_base||'';
     document.getElementById('custom_api_key').value=e.custom_api_key||'';
     document.getElementById('custom_auth_mode').value=e.custom_auth_mode||'x-admin-auth';
@@ -1342,7 +1330,6 @@ async function saveEmailConfig(){
     provider: document.getElementById('email_provider').value,
     email_failover: document.getElementById('email_failover').checked,
     tempmailer_domain: document.getElementById('tempmailer_domain').value.trim(),
-    inboxkitten_domain: document.getElementById('inboxkitten_domain').value.trim(),
     custom_api_base: document.getElementById('custom_api_base').value.trim(),
     custom_api_key: document.getElementById('custom_api_key').value,
     custom_auth_mode: document.getElementById('custom_auth_mode').value,

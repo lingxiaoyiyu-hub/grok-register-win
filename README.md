@@ -5,7 +5,7 @@ Windows 双击运行的 Grok 注册机面板：
 - **代理**：使用你本机已安装的 Clash（不内置 mihomo、不内置订阅）
 - **自动探测代理端口**（常见 `7897` / `7890` 等，Clash Verge 多为 7897）
 - **注册**：浏览器自动化注册
-- **邮箱**：面板可选 Tempmailer / InboxKitten / 自定义自建 API
+- **邮箱**：面板可选 Tempmailer / 自定义自建 API（InboxKitten 已移除：xAI 拒绝该域名）
 - **自动转 CPA**：注册成功后后台把 web SSO 换成 CLIProxyAPI 可用的 OAuth JSON
 - **下载**：
   - SSO TXT：`email----password----sso`
@@ -36,7 +36,7 @@ Windows 双击运行的 Grok 注册机面板：
    - 若失败，看 `data\logs\start.log`  
 4. 浏览器自动打开：http://127.0.0.1:8787  
 5. 默认密码：`admin`  
-6. 在「邮箱服务」里选 Tempmailer / InboxKitten / 自定义并保存  
+6. 在「邮箱服务」里选 Tempmailer 或自定义并保存  
 7. 点 **开始注册**  
 8. 下载 SSO / CPA；不需要的账号文件可勾选 **删除选中**
 
@@ -67,9 +67,10 @@ Windows 双击运行的 Grok 注册机面板：
 
 | 选项 | 说明 |
 |------|------|
-| Tempmailer | 内置免 key |
-| InboxKitten | 内置免 key |
+| Tempmailer | 内置免 key（默认 `bluenode.cc`） |
 | 自定义 | 自建临时邮 API（兼容 cloudflare_temp_email）：API 根地址 / Key / 域名 / 路径 |
+
+> **InboxKitten 已移除**：`inboxkitten.com` 域名会被 xAI 直接拒绝注册，请使用 Tempmailer 或自有域名。
 
 自定义需服务支持「创建地址」和「收信读验证码」。
 

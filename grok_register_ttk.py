@@ -60,10 +60,9 @@ DEFAULT_CONFIG = {
     "tempmailer_domains": [],
     "email_provider": "tempmailer",
     # 邮箱故障自动切换：按 email_providers 顺序轮换（只使用已配置可用的源）
+    # 注意：inboxkitten.com 已被 xAI 拒绝，不再作为内置/默认源
     "email_failover": True,
-    "email_providers": ["tempmailer", "inboxkitten", "duckmail", "yyds", "cloudflare"],
-    "inboxkitten_api_base": "https://inboxkitten.com/api/v1/mail",
-    "inboxkitten_domain": "inboxkitten.com",
+    "email_providers": ["tempmailer", "duckmail", "yyds", "cloudflare"],
     "proxy": "http://127.0.0.1:7890",
     # 代理失败时是否回退直连（本地版默认关闭，避免直连拿不到 grok SSO）
     "allow_proxy_fallback": False,
@@ -1414,269 +1413,22 @@ def tempmailer_get_oai_code(
 # ===== end tempmailer =====
 
 
-# ===== inboxkitten.com provider (public disposable mail API) =====
-INBOXKITTEN_API_BASE_DEFAULT = "https://inboxkitten.com/api/v1/mail"
-INBOXKITTEN_DOMAIN_DEFAULT = "inboxkitten.com"
-
-
-def get_inboxkitten_api_base():
-    return str(
-        config.get("inboxkitten_api_base") or INBOXKITTEN_API_BASE_DEFAULT
-    ).rstrip("/")
-
-
-def get_inboxkitten_domain():
-    return str(
-        config.get("inboxkitten_domain") or INBOXKITTEN_DOMAIN_DEFAULT
-    ).strip() or INBOXKITTEN_DOMAIN_DEFAULT
-
-
-def inboxkitten_local_part(length=10):
-    # 仅字母数字与连字符风格，避免奇怪字符
-    return generate_username(length)
-
-
-def inboxkitten_get_email_and_token():
-    """
-    InboxKitten 无需注册：任意本地名 @inboxkitten.com 即可收信。
-    token 存 local_part，读信时用 list?recipient=local_part
-    """
-    local = inboxkitten_local_part(10)
-    domain = get_inboxkitten_domain()
-    email = f"{local}@{domain}"
-    # 预热 list，确保 API 可用
-    base = get_inboxkitten_api_base()
-    try:
-        resp = http_get(
-            f"{base}/list",
-            params={"recipient": local},
-            timeout=20,
-            headers={
-                "User-Agent": get_user_agent(),
-                "Accept": "application/json",
-            },
-        )
-        # 空箱应返回 []
-        _ = resp.json()
-    except Exception as exc:
-        # 预热失败不阻断创建（有时空箱接口慢），仅提示
-        print(f"[Debug] inboxkitten list 预热: {exc}")
-    print(f"[*] 已创建 inboxkitten 邮箱: {email}")
-    return email, local
-
-
-def inboxkitten_get_messages(local_or_email):
-    local = str(local_or_email or "").strip()
-    if "@" in local:
-        local = local.split("@", 1)[0]
-    if not local:
-        return []
-    base = get_inboxkitten_api_base()
-    resp = http_get(
-        f"{base}/list",
-        params={"recipient": local},
-        timeout=20,
-        headers={
-            "User-Agent": get_user_agent(),
-            "Accept": "application/json",
-        },
-    )
-    try:
-        data = resp.json()
-    except Exception:
-        raise Exception(
-            f"inboxkitten list 返回非JSON: HTTP {resp.status_code} {resp.text[:300]}"
-        )
-    if isinstance(data, list):
-        return data
-    if isinstance(data, dict):
-        for key in ("messages", "mails", "items", "data"):
-            if isinstance(data.get(key), list):
-                return data[key]
-    return []
-
-
-def inboxkitten_parse_storage(msg):
-    """从 list item 提取 region/key。"""
-    if not isinstance(msg, dict):
-        return "", ""
-    storage = msg.get("storage") or {}
-    if isinstance(storage, dict):
-        region = str(storage.get("region") or storage.get("Region") or "").strip()
-        key = str(storage.get("key") or storage.get("Key") or "").strip()
-        if region or key:
-            return region, key
-    # 兼容扁平字段
-    region = str(msg.get("region") or "").strip()
-    key = str(msg.get("key") or msg.get("mailKey") or "").strip()
-    return region, key
-
-
-def inboxkitten_message_headers(msg):
-    if not isinstance(msg, dict):
-        return {}
-    message = msg.get("message") or {}
-    headers = {}
-    if isinstance(message, dict):
-        headers = message.get("headers") or message.get("Headers") or {}
-        if not isinstance(headers, dict):
-            headers = {}
-    # 扁平兼容
-    if not headers:
-        headers = {
-            "subject": msg.get("subject") or "",
-            "from": msg.get("from") or msg.get("sender") or "",
-        }
-    return headers
-
-
-def inboxkitten_get_message_body(region, key):
-    """优先 getHtml，失败再 getKey。"""
-    base = get_inboxkitten_api_base()
-    headers = {
-        "User-Agent": get_user_agent(),
-        "Accept": "text/html,application/json,*/*",
-    }
-    parts = []
-    # 官方前端：getHtml?region=&key=
-    for path, params in (
-        ("/getHtml", {"region": region, "key": key}),
-        ("/getKey", {"region": region, "key": key}),
-        # 第三方 lib 兼容：mailKey=storage-region-key
-        ("/getHtml", {"mailKey": f"storage-{region}-{key}"}),
-    ):
-        if not region and "mailKey" not in params:
-            continue
-        try:
-            resp = http_get(f"{base}{path}", params=params, timeout=20, headers=headers)
-            text = (resp.text or "").strip()
-            if not text:
-                continue
-            # JSON 则尽量拼字段
-            try:
-                data = resp.json()
-                if isinstance(data, dict):
-                    for field in (
-                        "body-html",
-                        "body-plain",
-                        "stripped-html",
-                        "stripped-text",
-                        "html",
-                        "text",
-                        "body",
-                        "content",
-                    ):
-                        val = data.get(field)
-                        if isinstance(val, str) and val.strip():
-                            parts.append(val)
-                    # headers subject
-                    hdr = data.get("headers") or {}
-                    if isinstance(hdr, dict) and hdr.get("subject"):
-                        parts.insert(0, f"Subject: {hdr.get('subject')}")
-                    if parts:
-                        return "\n".join(parts)
-            except Exception:
-                # HTML/纯文本
-                parts.append(text)
-                return text
-        except Exception:
-            continue
-    return "\n".join(parts)
-
-
-def inboxkitten_get_oai_code(
-    local_token,
-    email,
-    timeout=180,
-    poll_interval=3,
-    log_callback=None,
-    cancel_callback=None,
-    resend_callback=None,
-):
-    deadline = time.time() + timeout
-    seen = set()
-    next_resend_at = time.time() + 35
-    local = str(local_token or "").strip()
-    if "@" in local:
-        local = local.split("@", 1)[0]
-    if not local and email and "@" in email:
-        local = email.split("@", 1)[0]
-
-    while time.time() < deadline:
-        raise_if_cancelled(cancel_callback)
-        if resend_callback and time.time() >= next_resend_at:
-            try:
-                resend_callback()
-                if log_callback:
-                    log_callback("[*] 已触发重新发送验证码")
-            except Exception as exc:
-                if log_callback:
-                    log_callback(f"[Debug] 触发重发验证码失败: {exc}")
-            next_resend_at = time.time() + 35
-        try:
-            messages = inboxkitten_get_messages(local)
-        except Exception as exc:
-            if log_callback:
-                log_callback(f"[Debug] inboxkitten 拉取邮件列表失败: {exc}")
-            sleep_with_cancel(poll_interval, cancel_callback)
-            continue
-        if log_callback:
-            log_callback(f"[Debug] inboxkitten 本轮邮件数量: {len(messages)}")
-        for msg in messages:
-            region, key = inboxkitten_parse_storage(msg)
-            msg_id = key or str(msg.get("url") or msg.get("id") or "")
-            if not msg_id:
-                # 退化 key
-                hdr = inboxkitten_message_headers(msg)
-                msg_id = f"{hdr.get('subject','')}|{hdr.get('from','')}|{region}"
-            if msg_id in seen:
-                continue
-            seen.add(msg_id)
-            headers = inboxkitten_message_headers(msg)
-            subject = str(headers.get("subject") or headers.get("Subject") or "")
-            combined = f"Subject: {subject}\n" if subject else ""
-            if region and key:
-                try:
-                    body = inboxkitten_get_message_body(region, key)
-                    combined += body or ""
-                except Exception as exc:
-                    if log_callback:
-                        log_callback(f"[Debug] inboxkitten 取正文失败: {exc}")
-            else:
-                # 列表里可能自带摘要
-                for field in ("preview", "text", "html", "body", "summary"):
-                    val = msg.get(field)
-                    if isinstance(val, str) and val.strip():
-                        combined += "\n" + val
-            if log_callback:
-                log_callback(f"[Debug] inboxkitten 收到邮件: {subject or '(no subject)'}")
-            # HTML 去标签再匹配
-            plain = re.sub(r"<[^>]+>", " ", combined)
-            code = extract_verification_code(plain, subject) or extract_verification_code(
-                combined, subject
-            )
-            if code:
-                if log_callback:
-                    log_callback(f"[*] inboxkitten 从邮件中提取到验证码: {code}")
-                return code
-        sleep_with_cancel(poll_interval, cancel_callback)
-    raise Exception(f"inboxkitten 在 {timeout}s 内未收到验证码邮件")
-
-
-# ===== end inboxkitten =====
-
-
 def get_email_provider():
-    return str(config.get("email_provider") or "duckmail").strip().lower()
+    p = str(config.get("email_provider") or "tempmailer").strip().lower()
+    # inboxkitten.com 域名已被 xAI 拒绝，强制改用 tempmailer
+    if p in ("inboxkitten", "inbox_kitten"):
+        return "tempmailer"
+    return p or "tempmailer"
 
 
 def email_provider_ready(provider: str) -> bool:
     """判断邮箱源是否已配置到可尝试状态。"""
     p = (provider or "").strip().lower()
+    # 已从内置移除：xAI 拒绝 inboxkitten.com 域名
+    if p in ("inboxkitten", "inbox_kitten"):
+        return False
     if p == "tempmailer":
         return bool(get_tempmailer_api_base())
-    if p == "inboxkitten":
-        return bool(get_inboxkitten_api_base() and get_inboxkitten_domain())
     if p == "duckmail":
         return bool(str(config.get("duckmail_api_key") or "").strip())
     if p == "yyds":
@@ -1698,6 +1450,8 @@ def get_email_provider_chain():
         chain = [str(x).strip().lower() for x in raw if str(x).strip()]
     else:
         chain = []
+    # 过滤已废弃的 inboxkitten
+    chain = [p for p in chain if p not in ("inboxkitten", "inbox_kitten")]
     primary = get_email_provider()
     if primary and primary not in chain:
         chain.insert(0, primary)
@@ -1776,10 +1530,12 @@ def is_mail_related_error(exc) -> bool:
 
 def _get_email_and_token_once(provider, api_key=None):
     provider = (provider or "").strip().lower()
+    if provider in ("inboxkitten", "inbox_kitten"):
+        raise Exception(
+            "InboxKitten 已移除：xAI 拒绝域名 inboxkitten.com，请改用 tempmailer 或自定义邮箱"
+        )
     if provider == "tempmailer":
         return tempmailer_get_email_and_token()
-    if provider == "inboxkitten":
-        return inboxkitten_get_email_and_token()
     if provider == "yyds":
         return yyds_get_email_and_token(api_key=api_key, jwt=get_yyds_jwt())
     if provider == "cloudflare":
@@ -1865,18 +1621,10 @@ def get_oai_code(
     resend_callback=None,
 ):
     provider = get_email_provider()
+    if provider in ("inboxkitten", "inbox_kitten"):
+        provider = "tempmailer"
     if provider == "tempmailer":
         return tempmailer_get_oai_code(
-            dev_token,
-            email,
-            timeout=timeout,
-            poll_interval=poll_interval,
-            log_callback=log_callback,
-            cancel_callback=cancel_callback,
-            resend_callback=resend_callback,
-        )
-    if provider == "inboxkitten":
-        return inboxkitten_get_oai_code(
             dev_token,
             email,
             timeout=timeout,
@@ -3889,7 +3637,7 @@ class GrokRegisterGUI:
         self.email_provider_combo = tk_option_menu(
             config_frame,
             self.email_provider_var,
-            ["tempmailer", "inboxkitten", "duckmail", "yyds", "cloudflare"],
+            ["tempmailer", "duckmail", "yyds", "cloudflare"],
             width=12,
         )
         add_field(self.email_provider_combo, 0, 1, sticky=tk.W)
