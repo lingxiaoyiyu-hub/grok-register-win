@@ -40,6 +40,8 @@ from flask import (
 # Project root = parent of panel/ (Windows / portable layout)
 _DEFAULT_ROOT = Path(__file__).resolve().parent.parent
 BASE_DIR = Path(os.environ.get("GROK_REGISTER_DIR", str(_DEFAULT_ROOT))).resolve()
+# 面板默认不设登录密码（本机 127.0.0.1）。若需开启：PANEL_AUTH=1 且 PANEL_PASSWORD=xxx
+PANEL_AUTH = os.environ.get("PANEL_AUTH", "0").strip() not in ("0", "false", "False", "no", "")
 PANEL_PASSWORD = os.environ.get("PANEL_PASSWORD", "admin")
 HOST = os.environ.get("PANEL_HOST", "127.0.0.1")
 PORT = int(os.environ.get("PANEL_PORT", "8787"))
@@ -162,6 +164,9 @@ def log_line(msg: str):
 
 
 def require_login():
+    """默认关闭鉴权；仅当 PANEL_AUTH=1 时校验 session。"""
+    if not PANEL_AUTH:
+        return None
     if session.get("ok"):
         return None
     # API requests get JSON 401
@@ -1150,7 +1155,6 @@ INDEX_HTML = r"""
     <div class="actions">
       <a class="btn primary" href="/download/sso.txt" title="email----password----sso">下载 SSO (TXT)</a>
       <a class="btn ok" href="/download/cpa.zip" title="真 CPA OAuth JSON（CLIProxyAPI 可用）">下载 CPA (JSON)</a>
-      <a class="btn danger" href="/logout">退出</a>
     </div>
   </header>
 
@@ -1452,6 +1456,9 @@ a{color:#6ea8fe}pre{background:#171c27;border:1px solid #2a3344;border-radius:12
 # --------------- routes ---------------
 @app.get("/login")
 def login():
+    # 默认无密码：直接进面板
+    if not PANEL_AUTH:
+        return redirect(url_for("index"))
     if session.get("ok"):
         return redirect(url_for("index"))
     return render_template_string(LOGIN_HTML, error=None)
@@ -1459,6 +1466,8 @@ def login():
 
 @app.post("/login")
 def login_post():
+    if not PANEL_AUTH:
+        return redirect(url_for("index"))
     if request.form.get("password") == PANEL_PASSWORD:
         session["ok"] = True
         return redirect(request.args.get("next") or url_for("index"))
@@ -1468,6 +1477,8 @@ def login_post():
 @app.get("/logout")
 def logout():
     session.clear()
+    if not PANEL_AUTH:
+        return redirect(url_for("index"))
     return redirect(url_for("login"))
 
 
