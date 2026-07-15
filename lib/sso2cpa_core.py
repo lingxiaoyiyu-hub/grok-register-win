@@ -10,12 +10,41 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
 import re
 import secrets
+import shutil
+import tempfile
 import time
 from datetime import datetime, timezone
 from typing import Dict, List, Tuple
 from urllib.parse import urlencode, urlparse
+
+
+def _fix_curl_ca_bundle():
+    """curl_cffi 在 Windows 上无法处理含中文/空格的 CA 路径（curl error 77）。
+    将 certifi 的 cacert.pem 复制到 %TEMP%（纯英文路径）并设置环境变量。
+    """
+    try:
+        import certifi
+        src = certifi.where()
+        # 路径纯 ASCII 且存在则无需修复
+        try:
+            src.encode("ascii")
+            if os.path.exists(src):
+                return
+        except UnicodeEncodeError:
+            pass
+        # 复制到 TEMP（纯英文路径）
+        dst = os.path.join(tempfile.gettempdir(), "grok_cacert.pem")
+        shutil.copy2(src, dst)
+        os.environ["CURL_CA_BUNDLE"] = dst
+        os.environ["REQUESTS_CA_BUNDLE"] = dst
+    except Exception:
+        pass
+
+
+_fix_curl_ca_bundle()
 
 try:
     from curl_cffi import requests as cf_requests

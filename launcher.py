@@ -34,6 +34,7 @@ if not VENV_PY.exists():
 
 PANEL_HOST = os.environ.get("PANEL_HOST", "127.0.0.1")
 PANEL_PORT = int(os.environ.get("PANEL_PORT", "8787"))
+PANEL_AUTH = os.environ.get("PANEL_AUTH", "0").strip() not in ("0", "false", "False", "no", "")
 PANEL_PASSWORD = os.environ.get("PANEL_PASSWORD", "admin")
 
 
@@ -180,7 +181,10 @@ def _main_impl() -> int:
     log(f"Dir: {ROOT}")
     log(f"Python: {python_bin()}")
     log(f"Proxy: {proxy}")
-    log(f"Panel: http://{PANEL_HOST}:{PANEL_PORT}  password: {PANEL_PASSWORD}")
+    if PANEL_AUTH:
+        log(f"Panel: http://{PANEL_HOST}:{PANEL_PORT}  password: {PANEL_PASSWORD}")
+    else:
+        log(f"Panel: http://{PANEL_HOST}:{PANEL_PORT}  (no password, local only)")
     log("Use your own Clash for subscription/nodes. This app does not embed Clash.")
     log("======================================")
     check_proxy(proxy)

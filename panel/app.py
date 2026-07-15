@@ -171,6 +171,94 @@ def log_line(msg: str):
             pass
 
 
+# 日志过滤：只保留关键信息，屏蔽第三方库噪音
+_LOG_NOISE_PATTERNS = re.compile(
+    r"(?i)"
+    r"(<html|<!doctype|<div|<script|<svg|<path\b)"          # HTML 片段
+    r"|(playwright|drissionpage|camoufox|selenium|urllib3)"  # 第三方库调试
+    r"|(connection\.(reusable|pool)|starting new (http|https))"  # urllib3 连接日志
+    r"|(\bDEBUG\b|\bTRACE\b)"                                # 调试级别
+    r"|(node:|child_process|events\.js|node_modules)"        # Node.js 内部
+    r"|(pip\s|Downloading\s|Installing collected)"           # pip 安装
+)
+_LOG_KEY_PREFIXES = ("[*]", "[+]", "[-]", "[!]", "[Debug]", "[i]", "[OK]", "[ERR]")
+_LOG_KEY_KEYWORDS = (
+    "注册成功", "注册失败", "任务结束", "任务异常", "浏览器已启动", "开始注册",
+    "验证码", "邮箱", "NSFW", "CPA", "SSO", "OAuth", "账号", "停止", "清理",
+    "成功账号", "当前统计", "保存", "失败", "成功", "启动", "结束",
+)
+# 噪音行模式（即使是 [*] 前缀也过滤）：Cloudflare 轮询、GC 回收、网络模式重复
+_LOG_NOISE_LINES = re.compile(
+    r"(?i)"
+    r"(等待\s*Cloudflare\s*人机验证)"           # Cloudflare 轮询刷屏
+    r"|(Cloudflare\s*token\s*为空.*继续检测)"    # Cloudflare token 空轮询
+    r"|(Python\s*GC\s*已回收)"                  # GC 回收细节
+    r"|(浏览器网络模式)"                        # 每轮重复的网络模式
+    r"|(浏览器已启动)(?!.*\b第\b)"              # 第 N 轮以外的「浏览器已启动」重复
+    r"|(邮箱源\s*\w+\s*创建成功)"               # 与「已创建邮箱」重复
+    r"|(已创建邮箱.*源=)"                       # 与「已创建 tempmailer 邮箱」重复
+    r"|(资料已填:)"                             # 与「已填写注册资料并提交」重复
+    r"|(Turnstile\s*二次复用完成)"              # 调试细节
+    r"|(提交前仍卡住.*复用\s*Turnstile)"        # 调试细节
+)
+
+
+def _strip_inner_timestamp(line: str) -> str:
+    """去掉子进程日志自带的时间戳，避免与 panel 的 log_line 时间戳重复。
+    子进程原始行形如 "[02:30:39] [*] CLI 已加载配置" → 去掉前导时间戳 → "[*] CLI 已加载配置"
+    这样 log_line 再加时间戳就只有一层 "[02:30:39] [*] CLI 已加载配置"。
+    """
+    # 标准形式：[HH:MM:SS] 后跟内容
+    m = re.match(r"^\[\d{2}:\d{2}:\d{2}\]\s+(.*)$", line)
+    if m:
+        return m.group(1)
+    # 带 > 前缀形式：> [HH:MM:SS] [*] xxx
+    m = re.match(r"^>\s*\[\d{2}:\d{2}:\d{2}\]\s+(.*)$", line)
+    if m:
+        return m.group(1)
+    return line
+
+
+def _truncate_line(line: str, max_len: int = 200) -> str:
+    """超长行截断，保留前部关键信息。"""
+    if len(line) <= max_len:
+        return line
+    return line[:max_len] + " …"
+
+
+def _is_key_log(line: str) -> bool:
+    """判断一行日志是否为关键信息，应保留显示。"""
+    if not line:
+        return False
+    stripped = line.strip()
+    if not stripped:
+        return False
+    # 超长单行通常是 URL 或 HTML 片段
+    if len(stripped) > 400:
+        return False
+    # 噪音模式直接过滤
+    if _LOG_NOISE_PATTERNS.search(stripped):
+        return False
+    # 即使带 [*] 前缀的噪音行也过滤（Cloudflare 轮询、GC、网络模式重复）
+    if _LOG_NOISE_LINES.search(stripped):
+        return False
+    # 注册脚本自己的业务日志（带 [*]/[+]/[-]/[!] 等前缀）
+    for prefix in _LOG_KEY_PREFIXES:
+        if prefix in stripped:
+            return True
+    # 关键业务关键词
+    for kw in _LOG_KEY_KEYWORDS:
+        if kw in stripped:
+            return True
+    # panel 自己写的 [!] 前缀日志（已带时间戳）
+    if stripped.startswith("[") and "]" in stripped[:9]:
+        rest = stripped[stripped.find("]") + 1 :].strip()
+        if rest.startswith("[!]") or rest.startswith("[*]") or rest.startswith("[+]"):
+            return True
+    # 默认过滤（非关键噪音）
+    return False
+
+
 def require_login():
     """默认关闭鉴权；仅当 PANEL_AUTH=1 时校验 session。"""
     if not PANEL_AUTH:
@@ -899,7 +987,9 @@ def _run_one_round(round_no: int, total: int) -> bool:
         line = line.rstrip("\n")
         if not line:
             continue
-        log_line(line)
+        # 只有关键日志才写入面板显示，但状态检测仍基于原始内容
+        if _is_key_log(line):
+            log_line(_truncate_line(_strip_inner_timestamp(line)))
         if "注册成功" in line or "[+] 注册成功" in line:
             success = True
         if "注册失败" in line or "[-] 注册失败" in line:
@@ -1102,18 +1192,24 @@ LOGIN_HTML = """
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
   <title>登录 · Grok Register</title>
   <style>
-    :root{--bg:#0f1115;--card:#1a1f2b;--fg:#e8ecf4;--muted:#9aa6bf;--line:#2a3344}
-    body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;font-family:system-ui,sans-serif;background:radial-gradient(1200px 600px at 20% -10%,#1d2a44,transparent),var(--bg);color:var(--fg)}
-    .card{width:min(420px,92vw);background:var(--card);border:1px solid var(--line);border-radius:16px;padding:28px}
-    h1{margin:0 0 8px;font-size:22px} p{margin:0 0 18px;color:var(--muted);font-size:14px}
-    input{width:100%;padding:12px 14px;border-radius:10px;border:1px solid var(--line);background:#121722;color:var(--fg)}
-    button{margin-top:14px;width:100%;padding:12px;border:0;border-radius:10px;background:linear-gradient(135deg,#4f8cff,#6ea8fe);color:#fff;font-weight:600;cursor:pointer}
+    :root{--bg:#0b0e14;--card:#141a26;--fg:#eef2fb;--muted:#8b97b0;--line:#222b3d;--accent:#6ea8fe;--accent2:#4f8cff}
+    *{box-sizing:border-box}
+    body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;font-family:system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif;
+      background:radial-gradient(1200px 600px at 20% -10%,#1a2540 0%,transparent 55%),radial-gradient(900px 500px at 80% 100%,#1a1f3a 0%,transparent 50%),var(--bg);color:var(--fg);-webkit-font-smoothing:antialiased}
+    .card{width:min(420px,92vw);background:var(--card);border:1px solid var(--line);border-radius:18px;padding:32px;box-shadow:0 20px 60px rgba(0,0,0,.5)}
+    .brand{display:flex;align-items:center;gap:12px;margin-bottom:6px}
+    .logo{width:40px;height:40px;border-radius:11px;background:#000;display:flex;align-items:center;justify-content:center;font-size:22px;font-weight:900;color:#fff;flex-shrink:0;box-shadow:0 6px 18px rgba(0,0,0,.35);letter-spacing:-1px}
+    h1{margin:0;font-size:22px;font-weight:700} p{margin:6px 0 22px;color:var(--muted);font-size:13.5px}
+    input{width:100%;padding:12px 14px;border-radius:10px;border:1px solid var(--line);background:#0f131c;color:var(--fg);font-size:14px;font-family:inherit;transition:border-color .15s}
+    input:focus{outline:0;border-color:var(--accent);box-shadow:0 0 0 3px rgba(110,168,254,.15)}
+    button{margin-top:16px;width:100%;padding:12px;border:0;border-radius:10px;background:linear-gradient(135deg,var(--accent2),var(--accent));color:#fff;font-weight:600;font-size:14px;cursor:pointer;transition:box-shadow .15s}
+    button:hover{box-shadow:0 6px 18px rgba(79,140,255,.45)}
     .err{color:#ff8f8f;margin-top:10px;font-size:13px}
   </style>
 </head>
 <body>
 <form class="card" method="post">
-  <h1>Grok Register</h1>
+  <div class="brand"><div class="logo">G</div><h1>Grok Register</h1></div>
   <p>账号面板 · 启动注册 · 外置 Clash 代理</p>
   <input type="password" name="password" placeholder="面板密码" autofocus required/>
   {% if error %}<div class="err">{{ error }}</div>{% endif %}
@@ -1131,49 +1227,73 @@ INDEX_HTML = r"""
   <title>Grok Register 面板</title>
   <style>
     :root{
-      --bg:#0f1115;--card:#171c27;--fg:#eef2fb;--muted:#9aa6bf;--accent:#6ea8fe;
-      --ok:#3dd68c;--bad:#ff7b7b;--line:#2a3344;--chip:#222a3a;
+      --bg:#0b0e14;--bg2:#0f131c;--card:#141a26;--card2:#1a2130;--fg:#eef2fb;--muted:#8b97b0;--muted2:#6b7793;
+      --accent:#6ea8fe;--accent2:#4f8cff;--ok:#3dd68c;--bad:#ff7b7b;--warn:#ffb454;
+      --line:#222b3d;--line2:#2c3650;--chip:#1c2434;--chip2:#222c40;
     }
     *{box-sizing:border-box}
-    body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;background:radial-gradient(1000px 500px at 10% -20%,#1b2740,transparent),var(--bg);color:var(--fg)}
-    .wrap{max-width:1180px;margin:0 auto;padding:20px 14px 48px}
-    header{display:flex;flex-wrap:wrap;gap:12px;justify-content:space-between;align-items:center;margin-bottom:14px}
-    h1{margin:0;font-size:22px} .sub{color:var(--muted);font-size:12px;margin-top:4px}
-    .actions{display:flex;flex-wrap:wrap;gap:8px}
-    a.btn,button.btn{border:1px solid var(--line);background:var(--chip);color:var(--fg);padding:9px 12px;border-radius:10px;text-decoration:none;font-size:13px;cursor:pointer}
-    a.btn.primary,button.btn.primary{background:linear-gradient(135deg,#4f8cff,#6ea8fe);border-color:transparent;color:#fff;font-weight:600}
-    a.btn.ok,button.btn.ok{background:linear-gradient(135deg,#1f9d63,#3dd68c);border:0;color:#042}
+    body{margin:0;font-family:system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif;background:
+      radial-gradient(1200px 600px at 12% -18%,#1a2540 0%,transparent 55%),
+      radial-gradient(900px 500px at 92% 8%,#1a1f3a 0%,transparent 50%),
+      var(--bg);color:var(--fg);min-height:100vh;-webkit-font-smoothing:antialiased}
+    .wrap{max-width:1200px;margin:0 auto;padding:24px 16px 56px}
+    header{display:flex;flex-wrap:wrap;gap:16px;justify-content:space-between;align-items:center;margin-bottom:20px;padding-bottom:18px;border-bottom:1px solid var(--line)}
+    .brand{display:flex;align-items:center;gap:14px}
+    .logo{width:42px;height:42px;border-radius:12px;background:#000;display:flex;align-items:center;justify-content:center;font-size:24px;font-weight:900;color:#fff;flex-shrink:0;box-shadow:0 6px 18px rgba(0,0,0,.35);letter-spacing:-1px}
+    h1{margin:0;font-size:22px;font-weight:700;letter-spacing:.3px} .sub{color:var(--muted);font-size:12.5px;margin-top:3px}
+    .actions{display:flex;flex-wrap:wrap;gap:10px}
+    a.btn,button.btn{border:1px solid var(--line2);background:var(--chip);color:var(--fg);padding:10px 14px;border-radius:10px;text-decoration:none;font-size:13px;cursor:pointer;transition:all .15s ease;display:inline-flex;align-items:center;gap:6px}
+    a.btn:hover,button.btn:hover{background:var(--chip2);border-color:var(--accent);transform:translateY(-1px)}
+    a.btn:active,button.btn:active{transform:translateY(0)}
+    a.btn.primary,button.btn.primary{background:linear-gradient(135deg,var(--accent2),var(--accent));border-color:transparent;color:#fff;font-weight:600;box-shadow:0 4px 12px rgba(79,140,255,.3)}
+    a.btn.primary:hover,button.btn.primary:hover{box-shadow:0 6px 18px rgba(79,140,255,.45)}
+    a.btn.ok,button.btn.ok{background:linear-gradient(135deg,#1f9d63,#3dd68c);border:0;color:#042;font-weight:600;box-shadow:0 4px 12px rgba(61,214,140,.25)}
     a.btn.danger,button.btn.danger{background:#2a1717;border-color:#5a2b2b;color:#ffb4b4}
-    .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin:12px 0}
-    .stat{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:12px}
-    .stat .k{color:var(--muted);font-size:12px} .stat .v{font-size:20px;font-weight:700;margin-top:4px}
-    .card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:14px;margin-bottom:14px}
-    .card h2{margin:0 0 12px;font-size:15px}
-    .row{display:flex;flex-wrap:wrap;gap:10px;align-items:end}
+    a.btn.danger:hover,button.btn.danger:hover{background:#381c1c}
+    .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin:16px 0 20px}
+    .stat{background:linear-gradient(180deg,var(--card) 0%,var(--card2) 100%);border:1px solid var(--line);border-radius:14px;padding:14px 16px;position:relative;overflow:hidden;transition:border-color .15s}
+    .stat:hover{border-color:var(--accent)}
+    .stat::before{content:"";position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,var(--accent),transparent);opacity:.7}
+    .stat .k{color:var(--muted2);font-size:11.5px;text-transform:uppercase;letter-spacing:.5px}
+    .stat .v{font-size:22px;font-weight:700;margin-top:6px;color:var(--fg)}
+    .card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:18px;margin-bottom:16px;box-shadow:0 4px 16px rgba(0,0,0,.15)}
+    .card h2{margin:0 0 14px;font-size:15px;font-weight:600;display:flex;align-items:center;gap:8px}
+    .card h2::before{content:"";width:3px;height:14px;background:linear-gradient(180deg,var(--accent),var(--accent2));border-radius:2px}
+    .row{display:flex;flex-wrap:wrap;gap:12px;align-items:end}
     label{display:flex;flex-direction:column;gap:6px;font-size:12px;color:var(--muted)}
-    input,select{background:#121722;border:1px solid var(--line);color:var(--fg);border-radius:10px;padding:10px 12px;min-width:140px;font-size:13px}
+    input,select{background:var(--bg2);border:1px solid var(--line);color:var(--fg);border-radius:10px;padding:10px 12px;min-width:150px;font-size:13px;transition:border-color .15s;font-family:inherit}
+    input:focus,select:focus{outline:0;border-color:var(--accent);box-shadow:0 0 0 3px rgba(110,168,254,.15)}
     table{width:100%;border-collapse:collapse}
-    th,td{padding:10px 12px;border-bottom:1px solid var(--line);text-align:left;font-size:13px;vertical-align:top}
-    th{color:var(--muted);background:#121722}
-    .mono{font-family:ui-monospace,Menlo,Consolas,monospace;word-break:break-all}
-    .muted{color:var(--muted)} .tag{display:inline-block;padding:2px 8px;border-radius:999px;background:#1c2536;color:var(--muted);font-size:12px}
-    #logbox{height:320px;overflow:auto;background:#0c0f16;border:1px solid var(--line);border-radius:12px;padding:12px;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;line-height:1.45;white-space:pre-wrap}
-    .dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;background:#666}
-    .dot.run{background:var(--ok);box-shadow:0 0 8px var(--ok)}
-    .toast{position:fixed;right:16px;bottom:16px;background:#1d2433;border:1px solid var(--line);padding:10px 14px;border-radius:10px;display:none;z-index:9}
-    @media(max-width:800px){ th:nth-child(3),td:nth-child(3){display:none} }
+    th,td{padding:11px 14px;border-bottom:1px solid var(--line);text-align:left;font-size:13px;vertical-align:top}
+    th{color:var(--muted);background:var(--bg2);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.4px}
+    tbody tr{transition:background .12s}
+    tbody tr:hover{background:rgba(110,168,254,.04)}
+    .mono{font-family:ui-monospace,"JetBrains Mono",Menlo,Consolas,monospace;word-break:break-all;font-size:12.5px}
+    .muted{color:var(--muted)} .tag{display:inline-block;padding:3px 10px;border-radius:999px;background:var(--chip);color:var(--accent);font-size:12px;font-weight:500}
+    #logbox{height:340px;overflow:auto;background:var(--bg2);border:1px solid var(--line);border-radius:12px;padding:14px;font-family:ui-monospace,"JetBrains Mono",Menlo,Consolas,monospace;font-size:12.5px;line-height:1.5;white-space:pre-wrap;color:var(--muted)}
+    #logbox::-webkit-scrollbar{width:8px}
+    #logbox::-webkit-scrollbar-thumb{background:var(--line2);border-radius:4px}
+    .dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:7px;background:#555;vertical-align:middle}
+    .dot.run{background:var(--ok);box-shadow:0 0 10px var(--ok);animation:pulse 1.5s ease-in-out infinite}
+    @keyframes pulse{0%,100%{opacity:1}50%{opacity:.6}}
+    .toast{position:fixed;right:20px;bottom:20px;background:var(--card2);border:1px solid var(--line2);padding:12px 16px;border-radius:10px;display:none;z-index:9;box-shadow:0 8px 24px rgba(0,0,0,.4);font-size:13px}
+    code{background:var(--chip);padding:2px 6px;border-radius:4px;font-size:12px;color:var(--accent)}
+    @media(max-width:800px){ th:nth-child(3),td:nth-child(3){display:none} .row{flex-direction:column;align-items:stretch} input,select{min-width:0} }
   </style>
 </head>
 <body>
 <div class="wrap">
   <header>
-    <div>
-      <h1>Grok Register · Win 本地版</h1>
-      <div class="sub">{{ base_dir }} · 代理请用本机 Clash（默认 7890）</div>
+    <div class="brand">
+      <div class="logo">G</div>
+      <div>
+        <h1>Grok Register</h1>
+        <div class="sub">{{ base_dir }} · 代理走本机 Clash（Clash Verge 默认 7897）</div>
+      </div>
     </div>
     <div class="actions">
-      <a class="btn primary" href="/download/sso.txt" title="email----password----sso">下载 SSO (TXT)</a>
-      <a class="btn ok" href="/download/cpa.zip" title="真 CPA OAuth JSON（CLIProxyAPI 可用）">下载 CPA (JSON)</a>
+      <a class="btn primary" href="/download/sso.txt" title="email----password----sso">⬇ 下载 SSO (TXT)</a>
+      <a class="btn ok" href="/download/cpa.zip" title="CPA OAuth JSON（CLIProxyAPI 可用）">⬇ 下载 CPA (JSON)</a>
     </div>
   </header>
 
@@ -1485,11 +1605,27 @@ PREVIEW_HTML = """
 <!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
 <title>预览 {{ name }}</title>
-<style>body{margin:0;font-family:system-ui;background:#0f1115;color:#eef2fb}.wrap{max-width:1000px;margin:0 auto;padding:20px}
-a{color:#6ea8fe}pre{background:#171c27;border:1px solid #2a3344;border-radius:12px;padding:16px;overflow:auto;white-space:pre-wrap;word-break:break-all}</style>
+<style>
+:root{--bg:#0b0e14;--card:#141a26;--fg:#eef2fb;--muted:#8b97b0;--line:#222b3d;--accent:#6ea8fe;--accent2:#4f8cff;--bg2:#0f131c}
+*{box-sizing:border-box}
+body{margin:0;font-family:system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif;
+  background:radial-gradient(1000px 500px at 12% -18%,#1a2540 0%,transparent 55%),var(--bg);color:var(--fg);-webkit-font-smoothing:antialiased}
+.wrap{max-width:1000px;margin:0 auto;padding:24px 16px 56px}
+.top{display:flex;justify-content:space-between;align-items:center;margin-bottom:18px;padding-bottom:16px;border-bottom:1px solid var(--line);flex-wrap:wrap;gap:10px}
+.top a{color:var(--accent);text-decoration:none;font-size:13.5px;padding:8px 14px;border:1px solid var(--line);border-radius:8px;transition:all .15s}
+.top a:hover{border-color:var(--accent);background:rgba(110,168,254,.06)}
+.brand{display:flex;align-items:center;gap:10px}
+.logo{width:32px;height:32px;border-radius:9px;background:#000;display:flex;align-items:center;justify-content:center;font-size:17px;font-weight:900;color:#fff;letter-spacing:-1px}
+h1{margin:0;font-size:18px;font-weight:700}
+pre{background:var(--bg2);border:1px solid var(--line);border-radius:12px;padding:18px;overflow:auto;white-space:pre-wrap;word-break:break-all;font-family:ui-monospace,"JetBrains Mono",Menlo,Consolas,monospace;font-size:13px;line-height:1.5;color:var(--muted)}
+pre::-webkit-scrollbar{width:8px}
+pre::-webkit-scrollbar-thumb{background:var(--line);border-radius:4px}
+</style>
 </head><body><div class="wrap">
-<p><a href="/">← 返回</a> · <a href="/download/{{ name }}">下载</a></p>
-<h1 style="font-size:18px">{{ name }}</h1>
+<div class="top">
+  <div class="brand"><div class="logo">G</div><h1>{{ name }}</h1></div>
+  <div><a href="/">← 返回</a> · <a href="/download/{{ name }}">下载</a></div>
+</div>
 <pre>{{ content }}</pre>
 </div></body></html>
 """
