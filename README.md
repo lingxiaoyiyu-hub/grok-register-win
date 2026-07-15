@@ -34,6 +34,13 @@ Windows 双击运行的 Grok 注册机面板：
 
 ### v1.0.4（2026-07-16）
 
+**新功能：**
+- **Camoufox 无头浏览器引擎**：面板可切换「Camoufox 无头」引擎，基于 Firefox 反检测浏览器，无头运行不占用桌面
+  - 自动 GeoIP 对齐：根据出口 IP 自动匹配浏览器时区、语言、地理位置
+  - 首次使用自动下载 Firefox 二进制和 GeoLite2 数据库
+  - 与原有 Chromium 有头引擎二选一，面板下拉框切换
+
+**修复：**
 - 新增 `lib/patch_playwright.py`：启动时自动修补 Playwright `coreBundle.js` 的 `pageError.location` 崩溃
 - `start.bat` 和 `launcher.py` 在依赖安装后自动执行 patch（幂等，已修补不会重复）
 - 扩展提交按钮检测逻辑（`<a>` 标签 + 更多文本模式）
