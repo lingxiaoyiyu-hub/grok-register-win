@@ -2,10 +2,9 @@
 
 Windows 双击运行的 Grok 注册机面板：
 
-- **代理**：使用你本机已安装的 Clash（不内置 mihomo、不内置订阅）
-- **自动探测代理端口**（常见 `7897` / `7890` 等，Clash Verge 多为 7897）
-- **注册**：浏览器自动化注册（Chromium 有头 / Camoufox 无头反检测）
-- **邮箱**：面板可选 Tempmailer / 自定义自建 API（InboxKitten 已移除：xAI 拒绝该域名）
+- **代理**：使用本机已安装的 Clash，自动探测代理端口（Clash Verge 常见 `7897`）
+- **注册**：浏览器自动化注册，支持 Chromium 有头 / Camoufox 无头反检测
+- **邮箱**：内置 Tempmailer，或自定义自建临时邮 API
 - **自动转 CPA**：注册成功后后台把 web SSO 换成 CLIProxyAPI 可用的 OAuth JSON
 - **NSFW 自动开启**：注册成功后自动设置 ToS、生日、NSFW 偏好
 - **下载**：
@@ -54,7 +53,7 @@ Windows 双击运行的 Grok 注册机面板：
 1. **Windows 10/11**
 2. **Python 3.10+**（安装时勾选 Add python.exe to PATH）
 3. **本机 Clash**（Clash Verge / CFW / mihomo 客户端均可）
-   - Clash Verge 默认 mixed 端口常见为 **7897**（不一定是 7890）
+   - Clash Verge 默认 mixed 端口常见为 **7897**
    - 订阅、节点切换请在 **Clash 客户端** 里完成
 4. **Chrome 或 Edge**（默认 Chromium 有头引擎）
 5. **可选 Camoufox 无头**：面板可切换「Camoufox 无头」；首次使用会自动下载 Firefox 二进制
@@ -107,8 +106,6 @@ Windows 双击运行的 Grok 注册机面板：
 | Tempmailer | 内置免 key（默认 `bluenode.cc`） |
 | 自定义 | 自建临时邮 API（兼容 cloudflare_temp_email）：API 根地址 / Key / 域名 / 路径 |
 
-> **InboxKitten 已移除**：`inboxkitten.com` 域名会被 xAI 直接拒绝注册，请使用 Tempmailer 或自有域名。
-
 自定义需服务支持「创建地址」和「收信读验证码」。
 
 可选环境变量（高级）：
@@ -154,7 +151,7 @@ grok-register-win/
 
 ### 代理端口不通 / WinError 10061
 - 先开 Clash  
-- Clash Verge 常见端口 **7897**，不是 7890  
+- Clash Verge 默认端口 **7897**  
 - 或改 `config.json` 的 `proxy`，重启 `start.bat`（也会自动探测）
 
 ### 卡在 Cookie / 拿不到 SSO
