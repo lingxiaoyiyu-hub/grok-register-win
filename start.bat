@@ -101,7 +101,6 @@ echo    2. Pick a working node in Clash
 echo    3. Chrome/Edge ^(chromium^) or Camoufox headless via panel dropdown
 echo.
 echo  Panel:    http://127.0.0.1:8787
-echo  Password: admin
 echo  Log:      data\logs\start.log
 echo.
 

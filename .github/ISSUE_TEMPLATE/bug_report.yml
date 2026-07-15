@@ -1,0 +1,58 @@
+name: Bug 报告
+description: 报告使用中遇到的问题
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈！请尽量填写以下信息，便于快速定位问题。
+
+  - type: input
+    id: version
+    attributes:
+      label: 版本
+      placeholder: "例如 v1.0.5"
+    validations:
+      required: true
+
+  - type: input
+    id: engine
+    attributes:
+      label: 浏览器引擎
+      placeholder: "Chromium 有头 / Camoufox 无头"
+    validations:
+      required: true
+
+  - type: input
+    id: email
+    attributes:
+      label: 邮箱服务
+      placeholder: "Tempmailer / 自定义"
+    validations:
+      required: false
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: 问题描述
+      description: 发生了什么？预期行为是什么？
+      placeholder: "注册流程在 SSO 提取阶段卡住..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 相关日志
+      description: 可贴 `data/logs/` 下的日志片段或面板报错截图
+      render: shell
+    validations:
+      required: false
+
+  - type: input
+    id: proxy
+    attributes:
+      label: 代理环境
+      placeholder: "Clash Verge / 端口 / 节点地区"
+    validations:
+      required: false
