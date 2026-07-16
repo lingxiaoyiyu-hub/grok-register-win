@@ -178,10 +178,11 @@ def log_line(msg: str):
 
 
 # 日志过滤：只保留关键信息，屏蔽第三方库噪音
+# 注意：不要把业务日志里的 Camoufox/Playwright 字样当噪音误杀
 _LOG_NOISE_PATTERNS = re.compile(
     r"(?i)"
     r"(<html|<!doctype|<div|<script|<svg|<path\b)"          # HTML 片段
-    r"|(playwright|drissionpage|camoufox|selenium|urllib3)"  # 第三方库调试
+    r"|(?:^|\s)(?:playwright|drissionpage|selenium|urllib3)[\s:.]"  # 库调试，不含业务 Camoufox
     r"|(connection\.(reusable|pool)|starting new (http|https))"  # urllib3 连接日志
     r"|(\bDEBUG\b|\bTRACE\b)"                                # 调试级别
     r"|(node:|child_process|events\.js|node_modules)"        # Node.js 内部
@@ -192,6 +193,7 @@ _LOG_KEY_KEYWORDS = (
     "注册成功", "注册失败", "任务结束", "任务异常", "浏览器已启动", "开始注册",
     "验证码", "邮箱", "NSFW", "CPA", "SSO", "OAuth", "账号", "停止", "清理",
     "成功账号", "当前统计", "保存", "失败", "成功", "启动", "结束",
+    "浏览器", "Camoufox", "Chromium", "硬超时", "下载", "就绪",
 )
 # 噪音行模式（即使是 [*] 前缀也过滤）：Cloudflare 轮询、GC 回收、网络模式重复
 _LOG_NOISE_LINES = re.compile(
@@ -242,16 +244,16 @@ def _is_key_log(line: str) -> bool:
     # 超长单行通常是 URL 或 HTML 片段
     if len(stripped) > 400:
         return False
-    # 噪音模式直接过滤
-    if _LOG_NOISE_PATTERNS.search(stripped):
-        return False
     # 即使带 [*] 前缀的噪音行也过滤（Cloudflare 轮询、GC、网络模式重复）
     if _LOG_NOISE_LINES.search(stripped):
         return False
-    # 注册脚本自己的业务日志（带 [*]/[+]/[-]/[!] 等前缀）
+    # 业务前缀优先保留（避免 “Camoufox/Playwright” 字样被整行误杀）
     for prefix in _LOG_KEY_PREFIXES:
         if prefix in stripped:
             return True
+    # 噪音模式（无业务前缀时）
+    if _LOG_NOISE_PATTERNS.search(stripped):
+        return False
     # 关键业务关键词
     for kw in _LOG_KEY_KEYWORDS:
         if kw in stripped:
@@ -1040,6 +1042,23 @@ def _run_one_round(round_no: int, total: int) -> bool:
         f"[*] proxy={PROXY_URL} engine={engine_label} python={VENV_PYTHON} "
         f"round_timeout={round_timeout}s"
     )
+
+    # Camoufox 首次要下载浏览器二进制，不计入 5 分钟注册超时
+    if engine == "camoufox":
+        try:
+            lib_dir = str(BASE_DIR / "lib")
+            if lib_dir not in sys.path:
+                sys.path.insert(0, lib_dir)
+            from camoufox_backend import ensure_camoufox_ready  # type: ignore
+
+            log_line("[*] 检查 Camoufox 浏览器（首次会下载，可能几分钟）...")
+            exe = ensure_camoufox_ready(log_callback=log_line)
+            log_line(f"[*] Camoufox 就绪: {exe}")
+        except Exception as e:
+            log_line(f"[!] Camoufox 准备失败: {e}")
+            log_line("[!] 可改用 Chromium 有头引擎，或手动执行: .venv\\Scripts\\python.exe -m camoufox fetch")
+            return False
+
     cmd = [
         VENV_PYTHON,
         "-u",

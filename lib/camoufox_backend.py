@@ -13,6 +13,7 @@ import queue
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import List, Optional
 from urllib.parse import unquote, urlparse
@@ -207,24 +208,70 @@ def ensure_camoufox_ready(log_callback=None) -> str:
 
 def _fetch_camoufox_binary(log_callback=None) -> None:
     if log_callback:
-        log_callback("[*] 首次使用 Camoufox，正在下载浏览器二进制（可能较久）...")
+        log_callback("[*] 首次使用 Camoufox，正在下载浏览器二进制（可能较久，请耐心等待）...")
     cmd = [sys.executable, "-m", "camoufox", "fetch"]
     try:
-        proc = subprocess.run(
+        # 实时输出进度，避免“假死”观感
+        proc = subprocess.Popen(
             cmd,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
             text=True,
-            timeout=60 * 30,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
         )
-    except subprocess.TimeoutExpired as exc:
-        raise CamoufoxNotAvailable("camoufox fetch 超时（>30 分钟）") from exc
     except FileNotFoundError as exc:
         raise CamoufoxNotAvailable("无法执行 camoufox fetch") from exc
 
-    if proc.returncode != 0:
-        err = (proc.stderr or proc.stdout or "").strip()
+    deadline = time.time() + 60 * 30
+    last_ping = 0.0
+    lines: list[str] = []
+    try:
+        assert proc.stdout is not None
+        while True:
+            if time.time() > deadline:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+                raise CamoufoxNotAvailable("camoufox fetch 超时（>30 分钟）")
+            line = proc.stdout.readline()
+            if line:
+                text = line.rstrip()
+                if text:
+                    lines.append(text)
+                    if log_callback and (
+                        "download" in text.lower()
+                        or "fetch" in text.lower()
+                        or "%" in text
+                        or "MB" in text
+                        or "完成" in text
+                        or "error" in text.lower()
+                    ):
+                        log_callback(f"[*] Camoufox: {text[:180]}")
+            elif proc.poll() is not None:
+                break
+            else:
+                now = time.time()
+                if log_callback and now - last_ping >= 15:
+                    log_callback("[*] Camoufox 仍在下载浏览器，请稍候…")
+                    last_ping = now
+                time.sleep(0.5)
+        code = proc.wait(timeout=10)
+    except CamoufoxNotAvailable:
+        raise
+    except Exception as exc:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        raise CamoufoxNotAvailable(f"camoufox fetch 异常: {exc}") from exc
+
+    if code != 0:
+        err = "\n".join(lines[-20:]).strip()
         raise CamoufoxNotAvailable(
-            f"camoufox fetch 失败 (code={proc.returncode}): {err[:500]}"
+            f"camoufox fetch 失败 (code={code}): {err[:500]}"
         )
     if log_callback:
         log_callback("[+] Camoufox 浏览器下载完成")
