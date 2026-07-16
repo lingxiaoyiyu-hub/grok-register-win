@@ -3615,7 +3615,9 @@ return '';
             log_callback(f"[*] 已处理同意/Cookie 弹窗: {result}")
         return result or ""
     except Exception as e:
-        if log_callback:
+        # page_eval timeout / navigation mid-script is common after submit; soft-fail
+        msg = str(e or "")
+        if log_callback and "timeout" not in msg.lower():
             log_callback(f"[Debug] 处理 Cookie 弹窗失败: {e}")
         return ""
 

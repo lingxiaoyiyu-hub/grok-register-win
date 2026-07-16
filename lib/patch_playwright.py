@@ -97,9 +97,7 @@ def patch_playwright(log_callback=None) -> bool:
             log_callback(f"[patch] cannot read {cb}: {e}")
         return False
 
-    # Already patched?
-    if "pageError.location?.url ?? \"\"" in text:
-        return True
+    import re
 
     patched = text
     applied = 0
@@ -108,27 +106,29 @@ def patch_playwright(log_callback=None) -> bool:
             patched = patched.replace(old, new, 1)
             applied += 1
 
-    # Fallback: also handle already-partially-patched files (?. without ??)
-    if applied == 0:
-        # Try to find and fix any remaining pageError.location. without ??
-        import re
-        patched = re.sub(
-            r'pageError\.location\?\.url(?! *\?\?)',
-            'pageError.location?.url ?? ""',
-            patched,
-        )
-        patched = re.sub(
-            r'pageError\.location\?\.lineNumber(?! *\?\?)',
-            'pageError.location?.lineNumber ?? 0',
-            patched,
-        )
-        patched = re.sub(
-            r'pageError\.location\?\.columnNumber(?! *\?\?)',
-            'pageError.location?.columnNumber ?? 0',
-            patched,
-        )
-        if patched != text:
-            applied = 1
+    # Harden ALL remaining pageError.location(.|?.)field forms (Playwright 1.60+ has multiple)
+    before = patched
+    patched = re.sub(
+        r"pageError\.location(?:\?\.|\.)url(?!\s*\?\?)",
+        'pageError.location?.url ?? ""',
+        patched,
+    )
+    patched = re.sub(
+        r"pageError\.location(?:\?\.|\.)lineNumber(?!\s*\?\?)",
+        "pageError.location?.lineNumber ?? 0",
+        patched,
+    )
+    patched = re.sub(
+        r"pageError\.location(?:\?\.|\.)columnNumber(?!\s*\?\?)",
+        "pageError.location?.columnNumber ?? 0",
+        patched,
+    )
+    if patched != before:
+        applied += 1
+
+    # Already fully hardened?
+    if applied == 0 and "pageError.location?.url ?? \"\"" in patched and "pageError.location.url" not in patched:
+        return True
 
     if applied == 0:
         if log_callback:

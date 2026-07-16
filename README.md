@@ -153,6 +153,11 @@ grok-register-win/
 
 ## 更新日志
 
+### v1.0.10（2026-07-16）
+- 修 Playwright/Camoufox 提交后崩溃：补全 `pageError.location` 补丁（1.60 有多处未覆盖）
+- Cookie 弹窗 `page_eval` 超时改为短超时软失败，不再卡死 60 秒
+- 修正 GeoIP 模块名（`camoufox.locales`），优先使用较新的 Camoufox 152 二进制
+
 ### v1.0.9（2026-07-16）
 - 修复面板日志把 Camoufox 业务日志误过滤，导致“像卡住没输出”
 - Camoufox 首次下载浏览器**不计入** 5 分钟注册超时；下载进度会显示在日志

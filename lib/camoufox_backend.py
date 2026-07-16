@@ -92,36 +92,72 @@ def _path_has_non_ascii(path: str) -> bool:
 
 
 def _prepare_ascii_mmdb(log_callback=None) -> Optional[str]:
-    """Ensure GeoLite2 mmdb is on an ASCII path and patch camoufox.locale.MMDB_FILE."""
+    """Ensure GeoLite2 mmdb is on an ASCII path (camoufox.locales / package data)."""
     try:
         import shutil
         from pathlib import Path
 
-        import camoufox.locale as locale_mod
+        # camoufox>=0.5 uses camoufox.locales (plural); older used camoufox.locale
+        locale_mod = None
+        for mod_name in ("camoufox.locales", "camoufox.locale"):
+            try:
+                locale_mod = __import__(mod_name, fromlist=["*"])
+                break
+            except Exception:
+                continue
 
-        src = Path(getattr(locale_mod, "MMDB_FILE", "") or "")
-        # Prefer existing ASCII cache under LocalAppData
         candidates = []
         local = os.environ.get("LOCALAPPDATA") or ""
         if local:
             candidates.append(Path(local) / "camoufox" / "GeoLite2-City.mmdb")
+            candidates.append(Path(local) / "camoufox" / "camoufox" / "GeoLite2-City.mmdb")
             candidates.append(Path(local) / "grok-register-GeoLite2-City.mmdb")
-        # Source package path may contain non-ASCII (D:\下载\...)
-        if src and src.exists():
-            candidates.append(src)
+            # camoufox fetch may store mmdb under Cache
+            cache_root = Path(local) / "camoufox" / "camoufox" / "Cache"
+            if cache_root.exists():
+                try:
+                    for p in cache_root.rglob("*.mmdb"):
+                        candidates.append(p)
+                except Exception:
+                    pass
+
+        if locale_mod is not None:
+            for attr in ("MMDB_FILE", "GEOIP_PATH", "LOCAL_DATA"):
+                val = getattr(locale_mod, attr, None)
+                if not val:
+                    continue
+                try:
+                    p = Path(val)
+                    if p.is_dir():
+                        for name in ("GeoLite2-City.mmdb", "GeoLite2-City-ipv4.mmdb"):
+                            candidates.append(p / name)
+                    else:
+                        candidates.append(p)
+                except Exception:
+                    pass
+
+        # package data next to camoufox install
+        try:
+            import camoufox as cf_mod
+
+            pkg = Path(cf_mod.__file__).resolve().parent
+            for name in ("GeoLite2-City.mmdb", "GeoIP2-City.mmdb"):
+                candidates.append(pkg / name)
+                candidates.append(pkg / "data" / name)
+        except Exception:
+            pass
 
         ascii_path = None
         for c in candidates:
             try:
-                if c.exists() and not _path_has_non_ascii(str(c)):
+                if c.exists() and c.is_file() and not _path_has_non_ascii(str(c)):
                     ascii_path = c
                     break
             except Exception:
                 continue
 
         if ascii_path is None:
-            # Copy from non-ASCII source to LocalAppData
-            src_existing = next((c for c in candidates if c.exists()), None)
+            src_existing = next((c for c in candidates if c.exists() and c.is_file()), None)
             if src_existing is None:
                 return None
             base = Path(local or os.environ.get("TEMP") or ".") / "camoufox"
@@ -134,11 +170,13 @@ def _prepare_ascii_mmdb(log_callback=None) -> Optional[str]:
             ):
                 shutil.copy2(src_existing, ascii_path)
 
-        # Patch module constant used by get_geolocation()
-        try:
-            locale_mod.MMDB_FILE = Path(ascii_path)
-        except Exception:
-            pass
+        if locale_mod is not None:
+            for attr in ("MMDB_FILE", "GEOIP_PATH"):
+                if hasattr(locale_mod, attr):
+                    try:
+                        setattr(locale_mod, attr, Path(ascii_path))
+                    except Exception:
+                        pass
         if log_callback:
             log_callback(f"[*] Camoufox GeoIP DB: {ascii_path}")
         return str(ascii_path)
@@ -154,30 +192,79 @@ def _geoip_safe_to_enable(log_callback=None) -> bool:
 
 
 def _resolve_launch_exe() -> Optional[str]:
+    """Prefer newest installed camoufox.exe (152.x over stale 135.x defaults)."""
+    name = "camoufox.exe" if sys.platform.startswith("win") else "camoufox"
+    found: list[Path] = []
+
+    # Scan common caches first so we can pick the newest binary
+    roots = []
+    local = os.environ.get("LOCALAPPDATA") or ""
+    if local:
+        roots.append(Path(local) / "camoufox")
     try:
         from camoufox import pkgman
 
-        try:
-            path = pkgman.launch_path()
-            if path and Path(path).exists():
-                return str(path)
-        except Exception:
-            pass
+        for attr in ("INSTALL_DIR",):
+            d = getattr(pkgman, attr, None)
+            if d:
+                roots.append(Path(d))
         try:
             cache = pkgman.camoufox_path(download_if_missing=False)
-            exe = Path(cache) / ("camoufox.exe" if sys.platform.startswith("win") else "camoufox")
-            if exe.exists():
-                return str(exe)
+            if cache:
+                roots.append(Path(cache))
         except Exception:
             pass
-        install_dir = getattr(pkgman, "INSTALL_DIR", None)
-        if install_dir:
-            exe = Path(install_dir) / ("camoufox.exe" if sys.platform.startswith("win") else "camoufox")
-            if exe.exists():
-                return str(exe)
+        try:
+            path = pkgman.launch_path()
+            if path:
+                found.append(Path(path))
+        except Exception:
+            pass
     except Exception:
         pass
-    return None
+
+    for root in roots:
+        try:
+            if not root.exists():
+                continue
+            if root.is_file() and root.name.lower() == name.lower():
+                found.append(root)
+                continue
+            for p in root.rglob(name):
+                if p.is_file():
+                    found.append(p)
+        except Exception:
+            continue
+
+    # unique preserve
+    uniq = []
+    seen = set()
+    for p in found:
+        key = str(p).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        if p.exists():
+            uniq.append(p)
+
+    if not uniq:
+        return None
+
+    def _ver_key(p: Path):
+        # path like .../152.0.4-beta.26-xxx/camoufox.exe
+        s = str(p)
+        import re as _re
+
+        m = _re.search(r"(\d+)\.(\d+)\.(\d+)", s)
+        if m:
+            return tuple(int(x) for x in m.groups())
+        try:
+            return (0, 0, int(p.stat().st_mtime))
+        except Exception:
+            return (0, 0, 0)
+
+    best = max(uniq, key=_ver_key)
+    return str(best)
 
 
 def ensure_camoufox_ready(log_callback=None) -> str:
@@ -582,11 +669,18 @@ class _BrowserWorker:
             raise RuntimeError(f"Camoufox browser dead: {self._dead_reason}")
         if not self._thread.is_alive():
             raise RuntimeError("Camoufox worker thread is dead")
+        # Short default for eval so cookie/consent helpers fail soft instead of hanging 60s+
+        if op == "page_eval" and timeout == 120:
+            timeout = 12
         resp: queue.Queue = queue.Queue(maxsize=1)
         self._cmd_q.put((op, args, kwargs, resp))
         try:
             ok, payload = resp.get(timeout=timeout)
         except queue.Empty as exc:
+            # Mark dead only for hard ops; page_eval timeouts often mean navigation mid-script
+            if op not in ("page_eval", "page_query", "turnstile_token", "turnstile_click"):
+                self._dead = True
+                self._dead_reason = f"timeout:{op}"
             raise TimeoutError(f"Camoufox op timeout: {op}") from exc
         if ok:
             return payload
@@ -1030,7 +1124,8 @@ class CamoufoxPage:
 
     def run_js(self, script: str, *args):
         self._ensure_alive()
-        return self._worker.call("page_eval", self._pid, script, *args, timeout=60)
+        # Keep cookie/consent JS short; long hangs usually mean page navigated away
+        return self._worker.call("page_eval", self._pid, script, *args, timeout=12)
 
     def ele(self, selector: str):
         self._ensure_alive()
