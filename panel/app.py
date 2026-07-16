@@ -1330,6 +1330,10 @@ INDEX_HTML = r"""
       代理走本机 Clash（config.json 的 proxy，常见 7897）。节点在 Clash 里选。注册成功后自动转 CPA。
       Camoufox 首次使用会自动下载浏览器二进制。
     </div>
+    <div class="muted" style="margin-top:8px;font-size:12px;line-height:1.55">
+      提示：绝大多数注册失败来自网络环境，而非脚本本身。实测机场节点里<strong style="color:var(--ok);font-weight:600">日本</strong>更稳；
+      新加坡 / 美国 / 德国成功率偏低。失败时请先在 Clash 换日本节点再试。
+    </div>
   </div>
 
   <div class="card">
@@ -1390,15 +1394,11 @@ INDEX_HTML = r"""
         </label>
       </div>
     </div>
-    <div class="muted" style="margin-top:10px;font-size:12px" id="email_hint">加载邮箱配置…</div>
+    <div class="muted" style="margin-top:10px;font-size:12px;display:none" id="email_hint"></div>
   </div>
 
   <div class="card">
     <h2>运行日志</h2>
-    <div class="muted" style="margin:-6px 0 10px;font-size:12px;line-height:1.55">
-      提示：绝大多数注册失败来自网络环境，而非脚本本身。实测机场节点里<strong style="color:var(--ok);font-weight:600">日本</strong>更稳；
-      新加坡 / 美国 / 德国成功率偏低。失败时请先在 Clash 换日本节点再试。
-    </div>
     <div id="logbox">等待任务…</div>
   </div>
 
@@ -1477,11 +1477,18 @@ async function loadEmailConfig(){
     document.getElementById('custom_path_accounts').value=e.custom_path_accounts||'/admin/new_address';
     document.getElementById('custom_path_messages').value=e.custom_path_messages||'/api/mails';
     document.getElementById('custom_path_token').value=e.custom_path_token||'/api/token';
-    document.getElementById('email_hint').textContent=e.hint||'';
+    setEmailHint(e.hint||'');
     onEmailProviderChange();
   }catch(err){
-    document.getElementById('email_hint').textContent='加载邮箱配置失败: '+err.message;
+    setEmailHint('加载邮箱配置失败: '+err.message);
   }
+}
+function setEmailHint(text){
+  const el=document.getElementById('email_hint');
+  if(!el) return;
+  const t=String(text||'').trim();
+  el.textContent=t;
+  el.style.display=t ? '' : 'none';
 }
 async function saveEmailConfig(){
   const body={
@@ -1500,7 +1507,7 @@ async function saveEmailConfig(){
     const j=await api('/api/config/email',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
     toast(j.message||'邮箱设置已保存');
     if(j.email){
-      document.getElementById('email_hint').textContent='已保存 · 当前: '+(j.email.provider||'')+(j.email.custom_api_base?(' · '+j.email.custom_api_base):'');
+      setEmailHint('已保存 · 当前: '+(j.email.provider||'')+(j.email.custom_api_base?(' · '+j.email.custom_api_base):''));
     }
   }catch(e){toast('保存失败: '+e.message)}
 }

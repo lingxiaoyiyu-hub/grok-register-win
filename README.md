@@ -131,9 +131,15 @@ grok-register-win/
 - Clash Verge 默认端口 `7897`
 - 修改 `config.json` 的 `proxy` 后重启 `start.bat`（启动会自动探测）
 
+### 注册大量失败 / 验证码或页面异常
+- **绝大多数失败来自网络环境**，不是脚本本身
+- 实测机场节点里 **日本** 更稳；新加坡 / 美国 / 德国成功率偏低
+- 失败时先在 Clash 换日本节点，再点「开始注册」
+- 面板「启动注册」卡片下也有同样提示
+
 ### 卡在 Cookie / 拿不到 SSO
 - 已自动点击「接受所有 Cookie」
-- 仍失败请换节点重试
+- 仍失败请换节点重试（优先日本）
 
 ### 依赖安装失败
 ```bat
@@ -150,6 +156,7 @@ grok-register-win/
 - Sub2 ZIP 对齐 CPA：`README.txt` + 单账号 `grok-*.json` + 合集 `all.json`
 - 映射字段：`expired`→`credentials.expires_at`，`platform=grok`，`type=oauth`，`proxies=[]`
 - Sub2 按钮样式与 SSO/CPA 同为渐变实心按钮
+- 启动注册区增加网络提示（日本节点更稳）；邮箱区空 hint 自动隐藏；README FAQ 补充节点建议
 
 ### v1.0.6（2026-07-16）
 - 修复 CPA 转换在中文路径下失败：curl_cffi 无法处理非 ASCII CA 证书路径，启动时自动复制到 `%TEMP%`
