@@ -982,26 +982,41 @@ def _run_one_round(round_no: int, total: int) -> bool:
     """
     global _proc
     cfg = load_config()
-    cfg["register_count"] = 1
-    cfg["proxy"] = resolve_proxy_url()
+    # 面板每轮强制 register_count=1（job_worker 自己控轮数），但不要永久改坏用户配置
+    cfg_run = dict(cfg)
+    cfg_run["register_count"] = 1
+    cfg_run["proxy"] = resolve_proxy_url()
     global PROXY_URL
-    PROXY_URL = cfg["proxy"]
+    PROXY_URL = cfg_run["proxy"]
     os.environ["GROK_PROXY"] = PROXY_URL
-    cfg.setdefault("email_provider", "tempmailer")
-    engine = str(cfg.get("browser_engine") or "chromium").strip().lower()
+    cfg_run.setdefault("email_provider", "tempmailer")
+    engine = str(cfg_run.get("browser_engine") or "chromium").strip().lower()
     if engine in ("camoufox", "firefox", "headless", "cfox"):
         engine = "camoufox"
     else:
         engine = "chromium"
-    cfg["browser_engine"] = engine
-    save_config(cfg)
+    cfg_run["browser_engine"] = engine
+    # 只把代理/引擎写回；register_count 保持用户原值
+    try:
+        cfg_save = load_config()
+        cfg_save["proxy"] = cfg_run["proxy"]
+        cfg_save["browser_engine"] = engine
+        if "round_timeout_sec" not in cfg_save:
+            cfg_save["round_timeout_sec"] = DEFAULT_ROUND_TIMEOUT_SEC
+        save_config(cfg_save)
+        cfg = cfg_save
+    except Exception:
+        cfg = cfg_run
 
     round_timeout = resolve_round_timeout_sec(cfg)
+    # 子进程强制单账号；用环境变量覆盖，避免改坏 config.json 里的 register_count
+    os.environ["GROK_REGISTER_COUNT"] = "1"
 
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
     env["GROK_BROWSER_ENGINE"] = engine
     env["ROUND_TIMEOUT_SEC"] = str(round_timeout)
+    env["GROK_REGISTER_COUNT"] = "1"
     # Windows / local: use system Chrome/Edge; allow override (chromium engine only)
     if engine == "chromium":
         if os.name == "nt":
@@ -1157,13 +1172,16 @@ def _run_one_round(round_no: int, total: int) -> bool:
 
     if stopped:
         return False
+    # 已打出「注册成功」后若在 NSFW/关浏览器阶段卡住被硬超时杀掉，账号其实已可用
+    if success:
+        if timed_out:
+            log_line(
+                f"[!] 第 {round_no} 轮在成功后超时被终止，仍记为成功（账号文件可能已写入）"
+            )
+        return True
     if timed_out:
         log_line(f"[-] 第 {round_no} 轮因超时记为失败")
         return False
-    if success and not failed:
-        return True
-    if success:
-        return True
     return False
 
 
@@ -1215,21 +1233,32 @@ def job_worker(count: int, node: str = "", node_mode: str = "fixed", node_list: 
 
             before_lines = account_line_set()
             ok = _run_one_round(i, count)
+
+            # 无论本轮判定成功/失败，都扫一遍新账号文件：
+            # 避免「已写入 accounts 但日志未刷出/成功后硬超时」漏掉 CPA 转换
+            queued = 0
+            if AUTO_CPA:
+                time.sleep(0.8)
+                queued = enqueue_new_accounts(before_lines)
+                if queued:
+                    log_line(f"[CPA] 本轮新账号入队转换: {queued}")
+                elif ok:
+                    queued2 = enqueue_missing_accounts(limit=3)
+                    if queued2:
+                        log_line(f"[CPA] 未匹配到新行，补队最近未转换: {queued2}")
+                        queued = queued2
+                    else:
+                        log_line("[CPA] 本轮未发现可转换的新 SSO（可能文件未写出）")
+
+            # 日志没成功但文件里多了账号 → 也算成功
+            if not ok and queued > 0:
+                ok = True
+                log_line(f"[+] 第 {i} 轮日志未显示成功，但检测到 {queued} 个新账号，记为成功")
+
             if ok:
                 with _job_lock:
                     _job["success"] = int(_job.get("success") or 0) + 1
                 log_line(f"[+] 第 {i} 轮成功（累计成功 {_job['success']}）")
-                if AUTO_CPA:
-                    time.sleep(0.8)
-                    queued = enqueue_new_accounts(before_lines)
-                    if queued:
-                        log_line(f"[CPA] 本轮新账号入队转换: {queued}")
-                    else:
-                        queued2 = enqueue_missing_accounts(limit=3)
-                        if queued2:
-                            log_line(f"[CPA] 未匹配到新行，补队最近未转换: {queued2}")
-                        else:
-                            log_line("[CPA] 本轮未发现可转换的新 SSO（可能文件未写出）")
             else:
                 with _job_lock:
                     _job["fail"] = int(_job.get("fail") or 0) + 1

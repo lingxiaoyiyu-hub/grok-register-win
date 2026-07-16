@@ -4493,7 +4493,15 @@ def run_registration_cli(count):
 
 def main_cli():
     load_config()
-    count = int(config.get("register_count", 1) or 1)
+    # 面板通过 GROK_REGISTER_COUNT=1 强制单轮；否则用 config.register_count
+    env_count = str(os.environ.get("GROK_REGISTER_COUNT", "") or "").strip()
+    if env_count:
+        try:
+            count = max(1, int(env_count))
+        except Exception:
+            count = int(config.get("register_count", 1) or 1)
+    else:
+        count = int(config.get("register_count", 1) or 1)
     cli_log("[*] CLI 已加载配置")
     cli_log(f"[*] 当前邮箱服务商: {config.get('email_provider', 'duckmail')} | 注册数量: {count}")
     cli_log("[*] 输入 start 后开始；按 Ctrl+C 可强制停止")
