@@ -362,7 +362,13 @@ grok-register-win/
 
 <div align="center">
 
-[![Star History Chart](https://api.star-history.com/svg?repos=lingxiaoyiyu-hub/grok-register-win&type=Date)](https://star-history.com/#lingxiaoyiyu-hub/grok-register-win&Date)
+<a href="https://www.star-history.com/?type=date&repos=lingxiaoyiyu-hub%2Fgrok-register-win">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=lingxiaoyiyu-hub/grok-register-win&type=date&theme=dark&legend=top-left&sealed_token=-vg3z-S4RILoSRfe6EBljgNX-7lOxfUc210IMpVUQX_NXQQgn-XMSWPj4brEM4S56whH9MrReT2QUOuXx77w1Txd5n0hEftvvzKJaXhqKteJ_l6cSZgCXQ" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=lingxiaoyiyu-hub/grok-register-win&type=date&legend=top-left&sealed_token=-vg3z-S4RILoSRfe6EBljgNX-7lOxfUc210IMpVUQX_NXQQgn-XMSWPj4brEM4S56whH9MrReT2QUOuXx77w1Txd5n0hEftvvzKJaXhqKteJ_l6cSZgCXQ" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=lingxiaoyiyu-hub/grok-register-win&type=date&legend=top-left&sealed_token=-vg3z-S4RILoSRfe6EBljgNX-7lOxfUc210IMpVUQX_NXQQgn-XMSWPj4brEM4S56whH9MrReT2QUOuXx77w1Txd5n0hEftvvzKJaXhqKteJ_l6cSZgCXQ" />
+ </picture>
+</a>
 
 </div>
 
