@@ -6,7 +6,7 @@
 
 ### Windows 下双击即用的 Grok（xAI）账号自动注册面板
 
-[![Version](https://img.shields.io/badge/version-v1.3.0-blue?style=for-the-badge)](https://github.com/lingxiaoyiyu-hub/grok-register-win/releases)
+[![Version](https://img.shields.io/badge/version-v1.3.1-blue?style=for-the-badge)](https://github.com/lingxiaoyiyu-hub/grok-register-win/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green?style=for-the-badge)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-lightgrey?style=for-the-badge)](#环境要求)
 [![Python](https://img.shields.io/badge/python-3.10+-yellow?style=for-the-badge)](https://www.python.org/downloads/)
@@ -285,6 +285,10 @@ grok-register-win/
 
 <details>
 <summary><b>查看完整更新日志</b></summary>
+
+### v1.3.1（2026-07-20）
+- **下载对齐面板**：CPA / Sub2 只打包当前面板账号；删除账号文件时同步清理无主 CPA
+- 避免删号后下载仍全量打包
 
 ### v1.3.0（2026-07-20）
 - **上传 SSO 整批续期**：面板新增「上传 SSO → CPA / Sub2」
