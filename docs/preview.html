@@ -1,0 +1,647 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>GROK // REGISTER — Workshop Console</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,700;12..96,800&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --paper:#ece6d8;
+    --paper-2:#e3ddcd;
+    --ink:#0e0e0c;
+    --ink-2:#1d1d19;
+    --rust:#c8351a;
+    --rust-2:#a82a13;
+    --amber:#d98324;
+    --steel:#54524b;
+    --steel-2:#7a776d;
+    --line:#0e0e0c;
+    --grid:rgba(14,14,12,.06);
+    --ok:#2f6b2f;
+    --bad:#c8351a;
+    --warn:#d98324;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0}
+  body{
+    font-family:"IBM Plex Sans",sans-serif;
+    background:var(--paper);
+    background-image:
+      linear-gradient(var(--grid) 1px,transparent 1px),
+      linear-gradient(90deg,var(--grid) 1px,transparent 1px);
+    background-size:28px 28px;
+    color:var(--ink);
+    min-height:100vh;
+    -webkit-font-smoothing:antialiased;
+    position:relative;
+  }
+  /* paper grain */
+  body::before{
+    content:"";position:fixed;inset:0;pointer-events:none;z-index:1;
+    background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 0.05 0 0 0 0 0.05 0 0 0 0 0.04 0 0 0 0.08 0'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>");
+    opacity:.5;mix-blend-mode:multiply;
+  }
+  .console{max-width:1240px;margin:0 auto;padding:0 20px 64px;position:relative;z-index:2}
+
+  /* ── top bar ── */
+  .topbar{
+    display:flex;align-items:stretch;border:2px solid var(--ink);border-bottom:0;
+    background:var(--ink);color:var(--paper);
+  }
+  .topbar .brand{
+    display:flex;align-items:center;gap:14px;padding:14px 18px;flex:1;
+  }
+  .mark{
+    width:38px;height:38px;border:2px solid var(--paper);display:grid;place-items:center;
+    font-family:"Bricolage Grotesque",sans-serif;font-weight:800;font-size:20px;
+    background:var(--rust);color:var(--paper);letter-spacing:-1px;
+    box-shadow:3px 3px 0 var(--paper);
+  }
+  .brand h1{
+    margin:0;font-family:"Bricolage Grotesque",sans-serif;font-weight:800;
+    font-size:24px;letter-spacing:-.5px;line-height:1;
+  }
+  .brand h1 .slash{color:var(--rust)}
+  .brand .sub{font-family:"IBM Plex Mono",monospace;font-size:11px;color:#bdb9ad;margin-top:4px;letter-spacing:.5px}
+  .topbar .meta{
+    display:flex;align-items:center;gap:0;border-left:2px solid var(--paper);
+  }
+  .meta-cell{
+    padding:0 16px;display:flex;flex-direction:column;justify-content:center;
+    border-right:2px solid var(--paper);min-height:66px;
+  }
+  .meta-cell:last-child{border-right:0}
+  .meta-cell .k{font-family:"IBM Plex Mono",monospace;font-size:9.5px;color:#8f8c82;letter-spacing:1px;text-transform:uppercase}
+  .meta-cell .v{font-family:"IBM Plex Mono",monospace;font-size:13px;color:var(--paper);font-weight:500;margin-top:2px}
+  .meta-cell .v.live{color:var(--amber)}
+  .meta-cell .v.live::before{content:"●";margin-right:5px;animation:blink 1.4s steps(2) infinite}
+  @keyframes blink{50%{opacity:.25}}
+
+  /* ── downloads strip ── */
+  .dlstrip{
+    display:grid;grid-template-columns:repeat(3,1fr);
+    border:2px solid var(--ink);border-bottom:0;background:var(--paper-2);
+  }
+  .dlbtn{
+    border:0;border-right:2px solid var(--ink);background:transparent;
+    padding:14px 18px;display:flex;align-items:center;gap:14px;cursor:pointer;
+    font-family:inherit;color:var(--ink);text-align:left;transition:background .12s;
+    position:relative;
+  }
+  .dlbtn:last-child{border-right:0}
+  .dlbtn:hover{background:var(--ink);color:var(--paper)}
+  .dlbtn:hover .dl-ico{background:var(--rust);border-color:var(--paper);color:var(--paper)}
+  .dlbtn:hover .dl-arrow{transform:translate(2px,2px)}
+  .dl-ico{
+    width:40px;height:40px;border:2px solid var(--ink);display:grid;place-items:center;
+    font-family:"IBM Plex Mono",monospace;font-weight:600;font-size:13px;
+    background:var(--paper);flex-shrink:0;transition:all .12s;
+  }
+  .dlbtn .dl-body{display:flex;flex-direction:column;gap:2px}
+  .dlbtn .dl-name{font-family:"Bricolage Grotesque",sans-serif;font-weight:700;font-size:15px;letter-spacing:-.2px}
+  .dlbtn .dl-fmt{font-family:"IBM Plex Mono",monospace;font-size:10.5px;color:var(--steel)}
+  .dlbtn:hover .dl-fmt{color:#bdb9ad}
+  .dl-arrow{margin-left:auto;font-family:"IBM Plex Mono",monospace;font-size:18px;transition:transform .15s}
+
+  /* ── stats dashboard ── */
+  .dash{
+    display:grid;grid-template-columns:repeat(6,1fr);
+    border:2px solid var(--ink);border-bottom:0;background:var(--paper);
+  }
+  .stat{
+    border-right:2px solid var(--ink);padding:16px 16px 18px;position:relative;
+    background:var(--paper);
+  }
+  .stat:last-child{border-right:0}
+  .stat:nth-child(odd){background:var(--paper-2)}
+  .stat .idx{
+    position:absolute;top:8px;right:10px;font-family:"IBM Plex Mono",monospace;
+    font-size:9px;color:var(--steel-2);letter-spacing:1px;
+  }
+  .stat .k{
+    font-family:"IBM Plex Mono",monospace;font-size:10px;color:var(--steel);
+    letter-spacing:1.2px;text-transform:uppercase;
+  }
+  .stat .v{
+    font-family:"Bricolage Grotesque",sans-serif;font-weight:800;font-size:34px;
+    line-height:1;margin-top:10px;letter-spacing:-1px;color:var(--ink);
+  }
+  .stat .v.sm{font-size:18px}
+  .stat .v.rust{color:var(--rust)}
+  .stat .v.ok{color:var(--ok)}
+  .stat .bar{height:5px;background:rgba(14,14,12,.12);margin-top:10px;position:relative;overflow:hidden}
+  .stat .bar i{position:absolute;left:0;top:0;bottom:0;background:var(--rust);display:block}
+  .stat .sub{font-family:"IBM Plex Mono",monospace;font-size:10px;color:var(--steel-2);margin-top:6px}
+  .stat .led{display:inline-block;width:9px;height:9px;background:var(--steel-2);margin-right:6px;vertical-align:middle}
+  .stat .led.run{background:var(--ok);box-shadow:0 0 0 2px rgba(47,107,47,.25);animation:pulse 1.4s ease-in-out infinite}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
+
+  /* ── section frame ── */
+  .panel{border:2px solid var(--ink);background:var(--paper);margin-top:0}
+  .panel + .panel{margin-top:-2px}
+  .phead{
+    display:flex;align-items:center;gap:12px;padding:12px 16px;
+    border-bottom:2px solid var(--ink);background:var(--ink);color:var(--paper);
+  }
+  .phead .tag{
+    font-family:"IBM Plex Mono",monospace;font-size:10px;font-weight:600;
+    background:var(--rust);color:var(--paper);padding:3px 7px;letter-spacing:1px;
+  }
+  .phead h2{
+    margin:0;font-family:"Bricolage Grotesque",sans-serif;font-weight:700;
+    font-size:16px;letter-spacing:-.2px;
+  }
+  .phead .doc{margin-left:auto;font-family:"IBM Plex Mono",monospace;font-size:10px;color:#8f8c82;letter-spacing:.5px}
+  .pbody{padding:18px 16px}
+
+  /* corner ticks */
+  .panel{position:relative}
+  .panel::before,.panel::after{
+    content:"";position:absolute;width:10px;height:10px;border:2px solid var(--ink);background:var(--paper);
+  }
+  .panel::before{top:-6px;left:-6px}
+  .panel::after{bottom:-6px;right:-6px}
+
+  /* ── form controls ── */
+  .row{display:flex;flex-wrap:wrap;gap:14px;align-items:flex-end}
+  label.fld{display:flex;flex-direction:column;gap:6px;font-family:"IBM Plex Mono",monospace;font-size:10.5px;color:var(--steel);letter-spacing:.5px;text-transform:uppercase}
+  label.fld .lab{display:flex;align-items:center;gap:6px}
+  label.fld .lab b{color:var(--ink);font-weight:600}
+  input,select{
+    background:var(--paper);border:2px solid var(--ink);color:var(--ink);
+    padding:10px 12px;min-width:150px;font-size:13px;font-family:"IBM Plex Mono",monospace;
+    border-radius:0;appearance:none;outline:none;
+  }
+  input:focus,select:focus{box-shadow:3px 3px 0 var(--rust);transform:translate(-1px,-1px)}
+  select{background-image:linear-gradient(45deg,transparent 50%,var(--ink) 50%),linear-gradient(135deg,var(--ink) 50%,transparent 50%);background-position:calc(100% - 16px) 50%,calc(100% - 11px) 50%;background-size:5px 5px;background-repeat:no-repeat;padding-right:30px}
+  input[type=number]{font-weight:500}
+  input[type=checkbox]{width:16px;height:16px;min-width:0;accent-color:var(--rust)}
+  .chk-row{display:flex;align-items:center;gap:8px;font-family:"IBM Plex Mono",monospace;font-size:11px;color:var(--ink);text-transform:none;letter-spacing:0;padding-bottom:8px}
+
+  /* buttons */
+  .btn{
+    border:2px solid var(--ink);background:var(--paper);color:var(--ink);
+    padding:10px 16px;font-family:"IBM Plex Mono",monospace;font-size:12px;font-weight:600;
+    letter-spacing:.5px;text-transform:uppercase;cursor:pointer;border-radius:0;
+    display:inline-flex;align-items:center;gap:8px;transition:all .1s;
+    box-shadow:3px 3px 0 var(--ink);
+  }
+  .btn:hover{background:var(--ink);color:var(--paper);box-shadow:3px 3px 0 var(--rust)}
+  .btn:active{transform:translate(3px,3px);box-shadow:0 0 0 var(--ink)}
+  .btn.go{background:var(--rust);color:var(--paper);border-color:var(--ink)}
+  .btn.go:hover{background:var(--ink);box-shadow:3px 3px 0 var(--rust)}
+  .btn.stop{background:var(--ink);color:var(--paper)}
+  .btn.stop:hover{background:var(--rust);box-shadow:3px 3px 0 var(--ink)}
+  .btn.ghost{box-shadow:none;border-color:var(--ink)}
+  .btn.ghost:hover{box-shadow:3px 3px 0 var(--ink)}
+  .btn.sm{padding:7px 11px;font-size:11px;box-shadow:2px 2px 0 var(--ink)}
+  .btn.sm:hover{box-shadow:2px 2px 0 var(--rust)}
+
+  .hint{
+    font-family:"IBM Plex Mono",monospace;font-size:11px;color:var(--steel);
+    border-left:3px solid var(--amber);background:rgba(217,131,36,.1);
+    padding:9px 12px;margin:12px 0;line-height:1.6;
+  }
+  .hint code{background:var(--ink);color:var(--amber);padding:1px 5px;font-family:inherit}
+
+  /* mail boxes */
+  .mailbox{display:none;margin-top:14px;border:2px dashed var(--ink);padding:14px;background:var(--paper-2)}
+  .mailbox.show{display:block}
+
+  /* ── log console ── */
+  .logwrap{position:relative}
+  .log{
+    height:300px;overflow:auto;background:var(--ink);color:#cfcabc;
+    font-family:"IBM Plex Mono",monospace;font-size:12px;line-height:1.7;
+    padding:16px 18px;white-space:pre-wrap;border:2px solid var(--ink);
+    background-image:repeating-linear-gradient(0deg,rgba(255,255,255,.025) 0,rgba(255,255,255,.025) 1px,transparent 1px,transparent 3px);
+  }
+  .log::-webkit-scrollbar{width:10px}
+  .log::-webkit-scrollbar-track{background:var(--ink-2)}
+  .log::-webkit-scrollbar-thumb{background:var(--rust)}
+  .log .ts{color:#7a776d}
+  .log .ok{color:#7cc77c}
+  .log .err{color:#ff6b5b}
+  .log .warn{color:var(--amber)}
+  .log .dim{color:#8f8c82}
+  .log .rst{color:var(--rust)}
+
+  /* ── file table ── */
+  .toolbar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:12px 16px;border-bottom:2px solid var(--ink);background:var(--paper-2)}
+  .toolbar .ttl{font-family:"Bricolage Grotesque",sans-serif;font-weight:700;font-size:14px;margin-right:auto}
+  table{width:100%;border-collapse:collapse}
+  thead th{
+    font-family:"IBM Plex Mono",monospace;font-size:10px;font-weight:600;
+    text-align:left;padding:10px 14px;background:var(--ink);color:var(--paper);
+    letter-spacing:1px;text-transform:uppercase;border-right:2px solid var(--paper);
+  }
+  thead th:last-child{border-right:0}
+  tbody td{padding:11px 14px;border-bottom:2px solid var(--ink);font-size:12.5px;vertical-align:middle}
+  tbody tr:nth-child(even){background:var(--paper-2)}
+  tbody tr:hover{background:rgba(200,53,26,.08)}
+  .mono{font-family:"IBM Plex Mono",monospace;word-break:break-all}
+  .pill{
+    display:inline-block;padding:2px 8px;border:1.5px solid var(--ink);
+    font-family:"IBM Plex Mono",monospace;font-size:11px;font-weight:600;
+    background:var(--amber);color:var(--ink);
+  }
+  .td-time{font-family:"IBM Plex Mono",monospace;font-size:11px;color:var(--steel)}
+  .td-act{display:flex;gap:6px}
+
+  .empty{padding:28px;text-align:center;font-family:"IBM Plex Mono",monospace;color:var(--steel);font-size:12px}
+
+  /* toast */
+  .toast{
+    position:fixed;right:24px;bottom:24px;background:var(--ink);color:var(--paper);
+    border:2px solid var(--rust);padding:12px 18px;font-family:"IBM Plex Mono",monospace;
+    font-size:12px;box-shadow:5px 5px 0 var(--rust);z-index:50;
+    transform:translateY(20px);opacity:0;pointer-events:none;transition:all .2s;
+  }
+  .toast.show{transform:translateY(0);opacity:1}
+
+  /* footer stamp */
+  .stamp{
+    margin-top:24px;display:flex;justify-content:space-between;align-items:center;
+    font-family:"IBM Plex Mono",monospace;font-size:10px;color:var(--steel);
+    letter-spacing:1px;text-transform:uppercase;border-top:2px solid var(--ink);padding-top:12px;
+  }
+  .stamp .seal{
+    border:2px solid var(--rust);color:var(--rust);padding:4px 10px;font-weight:600;
+    transform:rotate(-2deg);
+  }
+
+  /* staggered load */
+  .reveal{opacity:0;transform:translateY(8px);animation:rv .5s ease forwards}
+  @keyframes rv{to{opacity:1;transform:none}}
+  .d1{animation-delay:.05s}.d2{animation-delay:.12s}.d3{animation-delay:.19s}
+  .d4{animation-delay:.26s}.d5{animation-delay:.33s}.d6{animation-delay:.40s}
+  .d7{animation-delay:.47s}
+
+  @media(max-width:900px){
+    .dash{grid-template-columns:repeat(3,1fr)}
+    .stat:nth-child(3){border-right:0}
+    .dlstrip{grid-template-columns:1fr}
+    .dlbtn{border-right:0;border-bottom:2px solid var(--ink)}
+    .meta-cell{display:none}
+    .meta-cell:last-child{display:flex}
+  }
+</style>
+</head>
+<body>
+<div class="console">
+
+  <!-- TOP BAR -->
+  <div class="topbar reveal d1">
+    <div class="brand">
+      <div class="mark">G</div>
+      <div>
+        <h1>GROK<span class="slash">//</span>REGISTER</h1>
+        <div class="sub">WORKSHOP CONSOLE · v1.4.0 · 本机 Clash 7897</div>
+      </div>
+    </div>
+    <div class="meta">
+      <div class="meta-cell"><span class="k">Engine</span><span class="v">CHROMIUM</span></div>
+      <div class="meta-cell"><span class="k">Proxy</span><span class="v">127.0.0.1:7897</span></div>
+      <div class="meta-cell"><span class="k">Status</span><span class="v live">RUNNING</span></div>
+    </div>
+  </div>
+
+  <!-- DOWNLOAD STRIP -->
+  <div class="dlstrip reveal d2">
+    <button class="dlbtn" onclick="toast('SSO TXT 导出')">
+      <div class="dl-ico">01</div>
+      <div class="dl-body">
+        <span class="dl-name">SSO Package</span>
+        <span class="dl-fmt">email----password----sso · TXT</span>
+      </div>
+      <span class="dl-arrow">↓</span>
+    </button>
+    <button class="dlbtn" onclick="toast('CPA JSON 导出')">
+      <div class="dl-ico">02</div>
+      <div class="dl-body">
+        <span class="dl-name">CPA Credentials</span>
+        <span class="dl-fmt">xai-*.json · OAuth · CLIProxyAPI</span>
+      </div>
+      <span class="dl-arrow">↓</span>
+    </button>
+    <button class="dlbtn" onclick="toast('Sub2 导入包导出')">
+      <div class="dl-ico">03</div>
+      <div class="dl-body">
+        <span class="dl-name">Sub2 Import Bundle</span>
+        <span class="dl-fmt">sub2api-data · grok-*.json + all.json</span>
+      </div>
+      <span class="dl-arrow">↓</span>
+    </button>
+  </div>
+
+  <!-- STATS DASHBOARD -->
+  <div class="dash reveal d3">
+    <div class="stat">
+      <span class="idx">[01]</span>
+      <div class="k">Files</div>
+      <div class="v">12</div>
+      <div class="sub">accounts_*.txt</div>
+    </div>
+    <div class="stat">
+      <span class="idx">[02]</span>
+      <div class="k">SSO Accounts</div>
+      <div class="v">37</div>
+      <div class="bar"><i style="width:74%"></i></div>
+    </div>
+    <div class="stat">
+      <span class="idx">[03]</span>
+      <div class="k">CPA Converted</div>
+      <div class="v ok">29</div>
+      <div class="sub">78% conv. rate</div>
+    </div>
+    <div class="stat">
+      <span class="idx">[04]</span>
+      <div class="k">CPA Queue</div>
+      <div class="v sm">8 / 0 / 0</div>
+      <div class="sub">wait · run · done</div>
+    </div>
+    <div class="stat">
+      <span class="idx">[05]</span>
+      <div class="k">Task</div>
+      <div class="v sm"><span class="led run"></span>active</div>
+      <div class="sub">round 4 / 10</div>
+    </div>
+    <div class="stat">
+      <span class="idx">[06]</span>
+      <div class="k">Reg. OK / FAIL</div>
+      <div class="v sm">3 <span style="color:var(--steel-2)">/</span> <span class="rust">1</span></div>
+      <div class="sub">75% success</div>
+    </div>
+  </div>
+
+  <!-- REGISTER PANEL -->
+  <div class="panel reveal d4">
+    <div class="phead">
+      <span class="tag">A·01</span>
+      <h2>Register Engine</h2>
+      <span class="doc">REG-MANUAL §2.1</span>
+    </div>
+    <div class="pbody">
+      <div class="row">
+        <label class="fld">
+          <span class="lab"><b>轮数</b> · ROUNDS</span>
+          <input type="number" id="count" min="1" max="500" value="1"/>
+        </label>
+        <label class="fld">
+          <span class="lab"><b>浏览器引擎</b> · ENGINE</span>
+          <select id="browser_engine">
+            <option value="chromium">Chromium 有头（默认）</option>
+            <option value="camoufox">Camoufox 无头（反检测）</option>
+          </select>
+        </label>
+        <button class="btn go" onclick="toast('开始注册')">▶ Execute</button>
+        <button class="btn stop" onclick="toast('已停止')">■ Halt</button>
+        <button class="btn ghost" onclick="toast('补转 CPA 队列')">⟳ Backfill CPA</button>
+      </div>
+      <div class="hint">代理走本机 Clash · 注册成功后自动转 CPA · 节点优先 <code>日本</code> 成功率更高</div>
+    </div>
+  </div>
+
+  <!-- UPLOAD PANEL -->
+  <div class="panel reveal d4">
+    <div class="phead">
+      <span class="tag">A·02</span>
+      <h2>SSO Renewal Upload</h2>
+      <span class="doc">REG-MANUAL §3.2</span>
+    </div>
+    <div class="pbody">
+      <div class="hint">支持 <code>email----password----sso</code> / <code>email----sso</code> / 纯 SSO。上传会整批替换当前工作区（旧数据归档到 <code>data/archive/</code>）。</div>
+      <div class="row">
+        <label class="fld" style="flex:2">
+          <span class="lab"><b>SSO 文件</b> · INPUT FILE</span>
+          <input type="file" id="sso_upload_file" accept=".txt,.json,text/plain,application/json"/>
+        </label>
+        <button class="btn" onclick="toast('上传并转换')">⬆ Upload &amp; Convert</button>
+      </div>
+      <div class="hint" style="border-color:var(--steel)">当前模式：注册 · 未上传批次</div>
+    </div>
+  </div>
+
+  <!-- MAIL PANEL -->
+  <div class="panel reveal d5">
+    <div class="phead">
+      <span class="tag">B·01</span>
+      <h2>Mail Service</h2>
+      <span class="doc">REG-MANUAL §4 · cfworker protocol</span>
+    </div>
+    <div class="pbody">
+      <div class="row">
+        <label class="fld">
+          <span class="lab"><b>邮箱源</b> · PROVIDER</span>
+          <select id="email_provider" onchange="onEmailProviderChange()">
+            <optgroup label="自建">
+              <option value="cfworker">CF Worker</option>
+              <option value="moemail">MoeMail</option>
+              <option value="freemail">Freemail</option>
+              <option value="opentrashmail">OpenTrashMail</option>
+            </optgroup>
+            <optgroup label="付费">
+              <option value="maliapi">MaliAPI (YYDS)</option>
+              <option value="luckmail">LuckMail</option>
+              <option value="skymail">SkyMail</option>
+              <option value="cloudmail">CloudMail</option>
+              <option value="laoudo">Laoudo</option>
+            </optgroup>
+          </select>
+        </label>
+        <label class="chk-row">
+          <input type="checkbox" id="email_failover" checked/> 失败时自动换源
+        </label>
+        <button class="btn go" onclick="toast('邮箱设置已保存')">💾 Save Config</button>
+      </div>
+
+      <div id="box_cfworker" class="mailbox show">
+        <div class="row">
+          <label class="fld" style="flex:2">
+            <span class="lab"><b>API URL</b></span>
+            <input type="text" id="cfworker_api_url" placeholder="https://apimail.example.com"/>
+          </label>
+          <label class="fld">
+            <span class="lab"><b>Admin Token</b></span>
+            <input type="password" id="cfworker_admin_token" placeholder="管理员密钥"/>
+          </label>
+        </div>
+        <div class="row" style="margin-top:10px">
+          <label class="fld"><span class="lab"><b>域名</b></span><input type="text" id="cfworker_domain" placeholder="mail.example.com"/></label>
+          <label class="fld"><span class="lab"><b>站点密码</b></span><input type="password" id="cfworker_custom_auth" placeholder="可选"/></label>
+          <label class="fld"><span class="lab"><b>子域名</b></span><input type="text" id="cfworker_subdomain" placeholder="可选"/></label>
+        </div>
+      </div>
+
+      <div id="box_moemail" class="mailbox">
+        <div class="row">
+          <label class="fld" style="flex:2"><span class="lab"><b>API URL</b></span><input type="text" placeholder="https://sall.cc"/></label>
+          <label class="fld"><span class="lab"><b>API Key</b></span><input type="password" placeholder="可选"/></label>
+        </div>
+      </div>
+
+      <div id="box_maliapi" class="mailbox">
+        <div class="row">
+          <label class="fld" style="flex:2"><span class="lab"><b>API URL</b></span><input type="text" placeholder="https://maliapi.215.im/v1"/></label>
+          <label class="fld"><span class="lab"><b>API Key</b></span><input type="password"/></label>
+          <label class="fld"><span class="lab"><b>域名</b></span><input type="text" placeholder="可选"/></label>
+        </div>
+      </div>
+
+      <div id="box_luckmail" class="mailbox">
+        <div class="row">
+          <label class="fld" style="flex:2"><span class="lab"><b>平台地址</b></span><input type="text" placeholder="https://mails.luckyous.com"/></label>
+          <label class="fld"><span class="lab"><b>API Key</b></span><input type="password"/></label>
+        </div>
+        <div class="row" style="margin-top:10px">
+          <label class="fld"><span class="lab"><b>项目代码</b></span><input type="text" placeholder="grok"/></label>
+          <label class="fld"><span class="lab"><b>域名</b></span><input type="text" placeholder="可选"/></label>
+        </div>
+      </div>
+
+      <div id="box_freemail" class="mailbox">
+        <div class="row">
+          <label class="fld" style="flex:2"><span class="lab"><b>API URL</b></span><input type="text"/></label>
+          <label class="fld"><span class="lab"><b>Admin Token</b></span><input type="password"/></label>
+          <label class="fld"><span class="lab"><b>域名</b></span><input type="text"/></label>
+        </div>
+      </div>
+
+      <div id="box_opentrashmail" class="mailbox">
+        <div class="row">
+          <label class="fld" style="flex:2"><span class="lab"><b>API URL</b></span><input type="text"/></label>
+          <label class="fld"><span class="lab"><b>域名</b></span><input type="text"/></label>
+          <label class="fld"><span class="lab"><b>密码</b></span><input type="password"/></label>
+        </div>
+      </div>
+
+      <div id="box_skymail" class="mailbox">
+        <div class="row">
+          <label class="fld" style="flex:2"><span class="lab"><b>API Base</b></span><input type="text" placeholder="https://api.skymail.ink"/></label>
+          <label class="fld"><span class="lab"><b>Token</b></span><input type="password"/></label>
+          <label class="fld"><span class="lab"><b>域名</b></span><input type="text"/></label>
+        </div>
+      </div>
+
+      <div id="box_cloudmail" class="mailbox">
+        <div class="row">
+          <label class="fld" style="flex:2"><span class="lab"><b>API Base</b></span><input type="text"/></label>
+          <label class="fld"><span class="lab"><b>管理员邮箱</b></span><input type="text"/></label>
+          <label class="fld"><span class="lab"><b>管理员密码</b></span><input type="password"/></label>
+        </div>
+        <div class="row" style="margin-top:10px"><label class="fld"><span class="lab"><b>域名</b></span><input type="text"/></label></div>
+      </div>
+
+      <div id="box_laoudo" class="mailbox">
+        <div class="row">
+          <label class="fld"><span class="lab"><b>Auth</b></span><input type="password"/></label>
+          <label class="fld"><span class="lab"><b>邮箱</b></span><input type="text"/></label>
+          <label class="fld"><span class="lab"><b>Account ID</b></span><input type="text"/></label>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- LOG PANEL -->
+  <div class="panel reveal d6">
+    <div class="phead">
+      <span class="tag">C·01</span>
+      <h2>Operation Log</h2>
+      <span class="doc">STDOUT · realtime</span>
+    </div>
+    <div class="pbody logwrap" style="padding:0">
+      <div class="log" id="logbox"><span class="dim">[</span><span class="ts">22:51:04</span><span class="dim">]</span> <span class="rst">==</span> 第 4/10 轮开始 · 节点 日本-东京-01
+<span class="dim">[</span><span class="ts">22:51:05</span><span class="dim">]</span> <span class="dim">[*]</span> proxy=http://127.0.0.1:7897 engine=Chromium 有头 round_timeout=300s
+<span class="dim">[</span><span class="ts">22:51:06</span><span class="dim">]</span> <span class="dim">[*]</span> 邮箱适配器: cfworker
+<span class="dim">[</span><span class="ts">22:51:07</span><span class="dim">]</span> <span class="dim">[*]</span> 已申请邮箱: grok-7f3a9c@mail.example.com（源=cfworker）
+<span class="dim">[</span><span class="ts">22:51:08</span><span class="dim">]</span> <span class="dim">[*]</span> 发码前收件箱已有 2 封邮件，将忽略旧信
+<span class="dim">[</span><span class="ts">22:51:32</span><span class="dim">]</span> <span class="ok">[✓]</span> 验证码: X9K-2M4
+<span class="dim">[</span><span class="ts">22:52:10</span><span class="dim">]</span> <span class="ok">[✓]</span> 注册成功 → accounts_20260721_225210.txt
+<span class="dim">[</span><span class="ts">22:52:11</span><span class="dim">]</span> <span class="dim">[*]</span> 入队 CPA 转换: grok-7f3a9c@mail.example.com
+<span class="dim">[</span><span class="ts">22:52:40</span><span class="dim">]</span> <span class="ok">[✓]</span> CPA 转换成功 (auth_kind=oauth)
+<span class="dim">[</span><span class="ts">22:52:41</span><span class="dim">]</span> <span class="warn">[!]</span> 上游 403 对话权限被拒（号本身无 Build 对话权限）
+<span class="dim">[</span><span class="ts">22:53:00</span><span class="dim">]</span> <span class="rst">==</span> 等待下一轮…</div>
+    </div>
+  </div>
+
+  <!-- FILE TABLE -->
+  <div class="panel reveal d7">
+    <div class="toolbar">
+      <span class="ttl">Account Files</span>
+      <button class="btn sm ghost" onclick="toast('全选')">全选</button>
+      <button class="btn sm ghost" onclick="toast('取消全选')">取消全选</button>
+      <button class="btn sm stop" onclick="toast('删除选中')">删除选中</button>
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th style="width:44px">☑</th>
+          <th>File</th>
+          <th style="width:90px">Count</th>
+          <th style="width:160px">Modified</th>
+          <th style="width:170px">Action</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><input type="checkbox" class="chk-file"/></td>
+          <td class="mono">accounts_20260721_225210.txt</td>
+          <td><span class="pill">3</span></td>
+          <td class="td-time">22:52:10</td>
+          <td class="td-act"><button class="btn sm ghost">预览</button><button class="btn sm go">下载</button></td>
+        </tr>
+        <tr>
+          <td><input type="checkbox" class="chk-file"/></td>
+          <td class="mono">accounts_20260721_223055.txt</td>
+          <td><span class="pill">5</span></td>
+          <td class="td-time">22:30:55</td>
+          <td class="td-act"><button class="btn sm ghost">预览</button><button class="btn sm go">下载</button></td>
+        </tr>
+        <tr>
+          <td><input type="checkbox" class="chk-file"/></td>
+          <td class="mono">accounts_20260721_220812.txt</td>
+          <td><span class="pill">2</span></td>
+          <td class="td-time">22:08:12</td>
+          <td class="td-act"><button class="btn sm ghost">预览</button><button class="btn sm go">下载</button></td>
+        </tr>
+        <tr>
+          <td><input type="checkbox" class="chk-file"/></td>
+          <td class="mono">accounts_20260721_214501.txt</td>
+          <td><span class="pill">8</span></td>
+          <td class="td-time">21:45:01</td>
+          <td class="td-act"><button class="btn sm ghost">预览</button><button class="btn sm go">下载</button></td>
+        </tr>
+        <tr>
+          <td><input type="checkbox" class="chk-file"/></td>
+          <td class="mono">accounts_20260720_184433.txt</td>
+          <td><span class="pill">12</span></td>
+          <td class="td-time">2026-07-20 18:44</td>
+          <td class="td-act"><button class="btn sm ghost">预览</button><button class="btn sm go">下载</button></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- FOOTER STAMP -->
+  <div class="stamp">
+    <span>GROK//REGISTER · WORKSHOP CONSOLE · MIT LICENSE</span>
+    <span class="seal">INSPECTED · v1.4.0</span>
+  </div>
+
+</div>
+
+<div class="toast" id="toast"></div>
+<script>
+function toast(m){const t=document.getElementById('toast');t.textContent='> '+m;t.classList.add('show');clearTimeout(window._tt);window._tt=setTimeout(()=>t.classList.remove('show'),2000)}
+function onEmailProviderChange(){
+  const p=document.getElementById('email_provider').value||'cfworker';
+  document.querySelectorAll('.mailbox').forEach(el=>el.classList.remove('show'));
+  const box=document.getElementById('box_'+p);
+  if(box) box.classList.add('show');
+}
+</script>
+</body>
+</html>
