@@ -1419,6 +1419,7 @@ INDEX_HTML = r"""
     label{display:flex;flex-direction:column;gap:6px;font-size:12px;color:var(--muted)}
     input,select{background:var(--bg2);border:1px solid var(--line);color:var(--fg);border-radius:10px;padding:10px 12px;min-width:150px;font-size:13px;transition:border-color .15s;font-family:inherit}
     input:focus,select:focus{outline:0;border-color:var(--accent);box-shadow:0 0 0 3px rgba(110,168,254,.15)}
+    input[type="checkbox"]{width:auto;min-width:0;padding:0;margin:0;background:transparent;border:0;border-radius:0;appearance:auto;-webkit-appearance:auto;cursor:pointer}
     table{width:100%;border-collapse:collapse}
     th,td{padding:11px 14px;border-bottom:1px solid var(--line);text-align:left;font-size:13px;vertical-align:top}
     th{color:var(--muted);background:var(--bg2);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.4px}
