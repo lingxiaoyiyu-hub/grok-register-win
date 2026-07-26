@@ -13,7 +13,6 @@ from typing import Any, Dict, List, Optional, Union
 
 from .http_client import LuckMailHttpClient, _is_async_context
 from .models import (
-    AppealInfo,
     EmailItem,
     ImportResult,
     OrderCode,

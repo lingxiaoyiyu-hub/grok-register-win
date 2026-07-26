@@ -21,7 +21,7 @@ import re
 import string
 import time
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional, Set
+from typing import Callable, Optional, Set
 
 
 # xAI confirmation codes look like "QII-8AM" / "7EC-OLY"
@@ -184,7 +184,7 @@ def message_text_blob(msg: dict) -> tuple[str, str]:
         return "", ""
     subject = str(msg.get("subject") or msg.get("Subject") or "").strip()
     parts: list[str] = []
-    for field in (
+    for key in (
         "text",
         "raw",
         "content",
@@ -195,7 +195,7 @@ def message_text_blob(msg: dict) -> tuple[str, str]:
         "html_body",
         "htmlBody",
     ):
-        val = msg.get(field)
+        val = msg.get(key)
         if isinstance(val, str) and val.strip():
             parts.append(val)
     html_list = msg.get("html") or []

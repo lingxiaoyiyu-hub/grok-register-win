@@ -5,8 +5,18 @@ Grok 注册机 - TTK GUI 版本
 整合 DrissionPage_example.py, openai_register.py, batch_open_nsfw.py
 """
 
-import tkinter as tk
-from tkinter import ttk, messagebox, scrolledtext
+# tkinter 只有 GUI 模式才需要。面板走的是 `grok_register_ttk.py cli`，
+# 之前在 import 阶段就硬依赖它，导致没装 tcl/tk 的 Python 连 CLI 都起不来。
+try:
+    import tkinter as tk
+    from tkinter import ttk, scrolledtext
+
+    TK_AVAILABLE = True
+except Exception:  # pragma: no cover - 取决于 Python 安装是否带 tcl/tk
+    tk = None  # type: ignore[assignment]
+    ttk = None  # type: ignore[assignment]
+    scrolledtext = None  # type: ignore[assignment]
+    TK_AVAILABLE = False
 import threading
 import datetime
 import time
@@ -34,7 +44,6 @@ if sys.platform == "win32":
 import socketserver
 import ssl
 import urllib.parse
-import uuid
 
 os.environ.setdefault("TK_SILENCE_DEPRECATION", "1")
 
@@ -261,6 +270,15 @@ DUCKMAIL_API_BASE = "https://api.duckmail.sbs"
 
 
 def get_configured_proxy():
+    """Proxy for this run. GROK_PROXY (set by the panel) wins over config.json.
+
+    README documents GROK_PROXY as a proxy override but nothing ever read it —
+    the panel made it work by rewriting config.json behind the user's back.
+    The panel no longer does that, so honour the env var here instead.
+    """
+    env_proxy = str(os.environ.get("GROK_PROXY", "") or "").strip()
+    if env_proxy:
+        return env_proxy
     return str(config.get("proxy", "") or "").strip()
 
 
@@ -936,6 +954,15 @@ def get_ca_bundle_path():
     return True
 
 
+def proxy_fallback_allowed():
+    """代理失败时是否允许改走直连。默认 False（与 config.example.json 一致）。
+
+    注意：直连会暴露真实出口 IP。历史上 http_get/http_post 无视这个开关，
+    只要代理报错就静默直连重试 —— 用户配置里明明写着不许直连。
+    """
+    return bool(config.get("allow_proxy_fallback", False))
+
+
 def _build_request_kwargs(**kwargs):
     request_kwargs = dict(kwargs)
     proxies = request_kwargs.pop("proxies", None)
@@ -998,6 +1025,10 @@ def http_get(url, **kwargs):
             except Exception:
                 pass
         if request_kwargs.get("proxies") and is_proxy_connection_error(exc):
+            if not proxy_fallback_allowed():
+                raise RuntimeError(
+                    f"代理连接失败且已关闭直连回退（allow_proxy_fallback=false）: {exc}"
+                ) from exc
             retry_kwargs = dict(kwargs)
             retry_kwargs["proxies"] = {}
             return requests.get(url, **_build_request_kwargs(**retry_kwargs))
@@ -1025,6 +1056,10 @@ def http_post(url, **kwargs):
             except Exception:
                 pass
         if request_kwargs.get("proxies") and is_proxy_connection_error(exc):
+            if not proxy_fallback_allowed():
+                raise RuntimeError(
+                    f"代理连接失败且已关闭直连回退（allow_proxy_fallback=false）: {exc}"
+                ) from exc
             retry_kwargs = dict(kwargs)
             retry_kwargs["proxies"] = {}
             return requests.post(url, **_build_request_kwargs(**retry_kwargs))
@@ -1794,17 +1829,6 @@ def snapshot_inbox_ids(dev_token, email=None, log_callback=None):
                     mid = str(msg.get("id") or msg.get("msgid") or "").strip()
                     if mid:
                         ids.add(mid)
-        elif provider == "duckmail" and dev_token:
-            # duckmail list if available via existing helpers
-            try:
-                messages = duckmail_list_messages(dev_token)  # type: ignore[name-defined]
-            except Exception:
-                messages = []
-            for msg in messages or []:
-                if isinstance(msg, dict):
-                    mid = str(msg.get("id") or "").strip()
-                    if mid:
-                        ids.add(mid)
     except Exception as exc:
         if log_callback:
             log_callback(f"[Debug] 快照收件箱 id 失败（可忽略）: {exc}")
@@ -2307,12 +2331,12 @@ def tk_entry(parent, textvariable=None, width=30, **kwargs):
     )
 
 
-def tk_button(parent, text="", command=None, state=tk.NORMAL, **kwargs):
+def tk_button(parent, text="", command=None, state=None, **kwargs):
     return tk.Button(
         parent,
         text=text,
         command=command,
-        state=state,
+        state=tk.NORMAL if state is None else state,
         bg=UI_BUTTON_BG,
         fg=UI_FG,
         activebackground=UI_ACTIVE_BG,
@@ -3827,17 +3851,19 @@ return String(cfInput.value || '').trim().length;
                     if prefer_domain and prefer_domain in domain:
                         preferred_hit = (domain, value)
                         break
-                    # 次优：非 accounts.x.ai 的 sso
+                    # 回退候选按优先级排序：
+                    #   prefer_domain（上面已直接返回）> 其它域 > accounts.x.ai
+                    # 原来这里有个「accounts.x.ai 仅记录不优先」的分支永远不会执行：
+                    # 上一条 `if not fallback_sso` 在同一轮里就已经把它赋值了，
+                    # 结果先看到的 accounts.x.ai 反而会占住回退位。
+                    is_accounts = "accounts.x.ai" in (domain or "")
                     if not fallback_sso:
                         fallback_sso = value
                         fallback_domain = domain or "?"
-                    elif "accounts.x.ai" in (fallback_domain or "") and "accounts.x.ai" not in domain:
+                    elif not is_accounts and "accounts.x.ai" in (fallback_domain or ""):
+                        # 用非 accounts.x.ai 的域替换掉之前记下的 accounts.x.ai
                         fallback_sso = value
                         fallback_domain = domain or "?"
-                    # accounts.x.ai 仅记录，不优先
-                    if "accounts.x.ai" in domain and not fallback_sso:
-                        fallback_sso = value
-                        fallback_domain = domain
                 if preferred_hit:
                     break
 
@@ -3931,12 +3957,12 @@ class GrokRegisterGUI:
                 pady=3,
             )
 
-        def add_field(widget, row, column, columnspan=1, sticky=tk.EW):
+        def add_field(widget, row, column, columnspan=1, sticky=None):
             widget.grid(
                 row=row,
                 column=column,
                 columnspan=columnspan,
-                sticky=sticky,
+                sticky=tk.EW if sticky is None else sticky,
                 padx=(0, 14),
                 pady=3,
             )
@@ -4212,7 +4238,7 @@ class GrokRegisterGUI:
                                 log_callback=self.log, cancel_callback=cancel_cb
                             )
                             self.log(f"[*] 邮箱: {email}")
-                            self.log(f"[Debug] 邮箱credential(jwt): {dev_token}")
+                            self.log(f"[Debug] 邮箱credential(jwt): {mask_secret(dev_token)}")
                             try:
                                 with open(
                                     os.path.join(
@@ -4313,15 +4339,20 @@ class GrokRegisterGUI:
                     retry_count_for_slot = 0
                     i += 1
                     self.log(f"[-] 注册失败: {exc}")
-                finally:
-                    self.update_stats()
-                    if self.should_stop():
-                        break
+                # 轮末收尾放在 finally 之外：在 finally 里 break / 调用会抛异常的
+                # restart_browser，会把本轮真正的异常悄悄吞掉或替换掉。
+                self.update_stats()
+                if self.should_stop():
+                    break
+                try:
                     if browser is None:
                         start_browser(log_callback=self.log)
                     else:
                         restart_browser(log_callback=self.log)
-                    sleep_with_cancel(1, self.should_stop)
+                except Exception as exc:
+                    self.log(f"[!] 重启浏览器失败，下一轮重试: {exc}")
+                    stop_browser()
+                sleep_with_cancel(1, self.should_stop)
         except Exception as exc:
             self.log(f"[!] 任务异常: {exc}")
         finally:
@@ -4347,6 +4378,20 @@ def cli_log(message):
         print(f"[{timestamp}] {message}", flush=True)
     except UnicodeEncodeError:
         print(f"[{timestamp}] {message}".encode("ascii", "replace").decode("ascii"), flush=True)
+
+
+def mask_secret(value, keep=6):
+    """Shorten a credential for logging.
+
+    Panel logs are rendered in the browser and mirrored to data/logs/run_*.log,
+    so printing a mailbox JWT in full leaves it sitting in plaintext on disk.
+    """
+    text = str(value or "")
+    if not text:
+        return "(空)"
+    if len(text) <= keep:
+        return "*" * len(text)
+    return f"{text[:keep]}…(共{len(text)}字符)"
 
 
 def _make_account_cancel(stop_callback, deadline, timeout_sec):
@@ -4408,7 +4453,7 @@ def run_registration_cli(count):
                             log_callback=cli_log, cancel_callback=cancel_cb
                         )
                         cli_log(f"[*] 邮箱: {email}")
-                        cli_log(f"[Debug] 邮箱credential(jwt): {dev_token}")
+                        cli_log(f"[Debug] 邮箱credential(jwt): {mask_secret(dev_token)}")
                         try:
                             with open(
                                 os.path.join(
@@ -4503,14 +4548,19 @@ def run_registration_cli(count):
                 retry_count_for_slot = 0
                 i += 1
                 cli_log(f"[-] 注册失败: {exc}")
-            finally:
-                if controller.should_stop():
-                    break
+            # 轮末收尾放在 finally 之外：在 finally 里 break / 调用会抛异常的
+            # restart_browser，会把本轮真正的异常悄悄吞掉或替换掉。
+            if controller.should_stop():
+                break
+            try:
                 if browser is None:
                     start_browser(log_callback=cli_log)
                 else:
                     restart_browser(log_callback=cli_log)
-                sleep_with_cancel(1, controller.should_stop)
+            except Exception as exc:
+                cli_log(f"[!] 重启浏览器失败，下一轮重试: {exc}")
+                stop_browser()
+            sleep_with_cancel(1, controller.should_stop)
     except KeyboardInterrupt:
         controller.stop()
         cli_log("[!] 收到 Ctrl+C，正在停止并清理")
@@ -4550,9 +4600,17 @@ def main():
     if len(sys.argv) > 1 and sys.argv[1].strip().lower() in ("start", "cli", "--cli"):
         main_cli()
         return
+    if not TK_AVAILABLE:
+        print(
+            "[!] 当前 Python 没有 tkinter，无法启动图形界面。\n"
+            "    面板模式不受影响：请用 start.bat 打开 Web 面板，"
+            "或直接运行 `python grok_register_ttk.py cli`。",
+            flush=True,
+        )
+        return 1
     root = tk.Tk()
     setup_light_theme(root)
-    app = GrokRegisterGUI(root)
+    GrokRegisterGUI(root)
     root.mainloop()
 
 

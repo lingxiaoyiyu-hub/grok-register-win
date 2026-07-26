@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install -U pip
+          # 系统包管理器装的 blinker 没有 RECORD，pip 无法卸载会直接失败
+          python -m pip install --ignore-installed blinker -r requirements.txt
+          python -m pip install pytest ruff
+
+      - name: Lint (error-class rules)
+        run: ruff check --select=E9,F63,F7,F82,F811,F841,B006,B012,B023,E711,E712,E722,F401,F402 .
+
+      - name: Byte-compile
+        run: python -m compileall -q .
+
+      - name: Tests
+        run: python -m pytest tests/ -q

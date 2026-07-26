@@ -6,7 +6,7 @@
 
 ### Grok（xAI）账号自动注册面板
 
-[![Version](https://img.shields.io/badge/version-v2.0.0-blue?style=for-the-badge)](https://github.com/lingxiaoyiyu-hub/grok-register-win/releases)
+[![Version](https://img.shields.io/badge/version-v2.0.1-blue?style=for-the-badge)](https://github.com/lingxiaoyiyu-hub/grok-register-win/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green?style=for-the-badge)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.10+-yellow?style=for-the-badge)](https://www.python.org/downloads/)
 [![Stars](https://img.shields.io/github/stars/lingxiaoyiyu-hub/grok-register-win?style=for-the-badge&label=stars)](https://github.com/lingxiaoyiyu-hub/grok-register-win/stargazers)
@@ -37,7 +37,7 @@
 ## ✨ 功能
 
 - **代理**：复用 Clash / mihomo 代理（常见端口 `7897`）
-- **注册引擎**：Chromium 有头 / Camoufox 无头（面板可切换；服务器版仅无头）
+- **注册引擎**：Chromium 有头 / Camoufox 无头（面板可切换）
 - **邮箱**：多源下拉（CF Worker、MoeMail、LuckMail、MaliAPI、SkyMail、CloudMail、Freemail、OpenTrashMail、Laoudo 等）
 - **SSO → CPA**：注册成功后自动换成 CLIProxyAPI 可用的 OAuth JSON
 - **上传 SSO 续期**：上传 SSO txt 或 CPA `all.json`，整批换票；旧批次归档到 `data/archive/`
@@ -52,20 +52,13 @@
 
 ## 📦 发行包
 
-在 [Releases · v2.0.0](https://github.com/lingxiaoyiyu-hub/grok-register-win/releases/tag/v2.0.0) 下载：
+在 [Releases · v2.0.1](https://github.com/lingxiaoyiyu-hub/grok-register-win/releases/tag/v2.0.1) 下载 **Source code**，解压后双击 `start.bat`（使用本机 Clash 管理节点）。
 
-| 包 | 适用 | 说明 |
-| :--- | :--- | :--- |
-| **Source code** / 常规源码 | Windows 本地 | 使用本机 Clash 管理节点；双击 `start.bat` |
-| **`grok-register-server-v2.0.0-mihomo.zip`** | Linux 服务器 | **内置 mihomo**、面板填订阅链接、**仅 Camoufox 无头**；`./start.sh` |
-
-服务器包详情见压缩包内 `SERVER_README.md`。
+> 自 v2.0.1 起不再提供服务器版发行包，本项目专注 Windows 本地使用。
 
 ---
 
 ## 📋 环境要求
-
-### 本地版（Windows）
 
 | 项 | 说明 |
 | :--- | :--- |
@@ -74,20 +67,9 @@
 | 代理 | 本机 Clash（Verge / CFW / mihomo 等），在客户端选节点 |
 | 浏览器 | Chrome / Edge（有头）；Camoufox 可选，首次自动下载 |
 
-### 服务器版（Linux）
-
-| 项 | 说明 |
-| :--- | :--- |
-| 系统 | Linux x86_64（无需桌面） |
-| Python | 3.10+ |
-| 代理 | 包内 `bin/mihomo`，面板填写订阅即可 |
-| 浏览器 | 仅 Camoufox 无头 |
-
 ---
 
 ## 🚀 快速开始
-
-### Windows 本地
 
 1. 下载源码 ZIP 并解压  
 2. 打开本机 Clash，选可用节点（建议日本）  
@@ -97,17 +79,6 @@
 6. 下载 SSO / CPA / Sub2  
 
 失败日志：`data\logs\start.log`
-
-### Linux 服务器
-
-```bash
-unzip grok-register-server-v2.0.0-mihomo.zip
-cd grok-register-server
-chmod +x start.sh bin/mihomo
-./start.sh
-```
-
-打开 `http://服务器IP:8787` → 配邮箱 → **订阅链接 → 更新订阅 → 选节点** → 开始注册。
 
 ---
 
@@ -132,15 +103,13 @@ chmod +x start.sh bin/mihomo
 
 | 字段 | 说明 |
 | :--- | :--- |
-| `proxy` | HTTP 代理地址；端口不通时启动可能自动探测 |
-| `allow_proxy_fallback` | 代理失败是否直连，默认 `false` |
-| `browser_engine` | `chromium` 或 `camoufox`（服务器版固定 `camoufox`） |
+| `proxy` | HTTP 代理地址；端口不通时会探测本机常见 Clash 端口（**仅本次生效，不写回本文件**） |
+| `allow_proxy_fallback` | 代理失败是否改走直连，默认 `false`（关闭时代理失败直接报错，不会暴露真实 IP） |
+| `browser_engine` | `chromium`（有头）或 `camoufox`（无头反检测） |
 | `email_provider` | 邮箱源 id |
 | `email_failover` | 失败时是否换源 |
 | `register_count` | 单次任务注册数量 |
 | `round_timeout_sec` | 单账号硬超时（秒），默认 `300` |
-
-服务器版额外常用字段：`clash_subscription`、`clash_mixed_port`、`use_embedded_clash` 等（见 `config.example.json`）。
 
 ### 邮箱源
 
@@ -159,12 +128,16 @@ chmod +x start.sh bin/mihomo
 
 | 变量 | 含义 | 默认 |
 | :--- | :--- | :--- |
-| `PANEL_AUTH` | `1` 开启登录 | `0` |
-| `PANEL_PASSWORD` | 登录密码 | `admin` |
-| `PANEL_HOST` | 监听地址 | 本地 `127.0.0.1` / 服务器常用 `0.0.0.0` |
+| `PANEL_HOST` | 监听地址（面板只接受本机访问） | `127.0.0.1` |
 | `PANEL_PORT` | 端口 | `8787` |
-| `GROK_PROXY` | 覆盖代理 | — |
+| `PANEL_ALLOWED_HOSTS` | 额外允许的 Host 头，逗号分隔 | — |
+| `GROK_PROXY` | 覆盖代理（优先级高于 `config.json`） | — |
 | `ROUND_TIMEOUT_SEC` | 覆盖单轮超时 | `300` |
+
+> **关于面板安全**：面板是纯本机工具，只监听回环地址，并会校验请求的
+> `Host` 与 `Origin`，拒绝来自其它网页的跨站请求。
+> v2.0.0 及更早版本的 `PANEL_AUTH` / `PANEL_PASSWORD` 登录功能已移除 ——
+> 它的签名密钥硬编码在源码里，任何人都能伪造登录态，属于假锁。
 
 ---
 
@@ -172,17 +145,16 @@ chmod +x start.sh bin/mihomo
 
 ```
 grok-register-win/
-├── start.bat / start.sh      # 启动入口
+├── start.bat                 # 启动入口
 ├── launcher.py
 ├── grok_register_ttk.py      # 注册主程序
 ├── config.example.json
 ├── panel/app.py              # Web 面板
 ├── lib/                      # SSO→CPA、邮箱、Camoufox 等
-├── bin/mihomo                # 仅服务器发行包内置
+├── tests/                    # 回归测试（pytest）
 ├── data/
 │   ├── logs/
 │   ├── cpa/
-│   ├── clash/                # 服务器版 mihomo 运行时
 │   └── archive/
 └── accounts_*.txt
 ```
@@ -194,8 +166,9 @@ grok-register-win/
 <details>
 <summary><b>代理端口不通</b></summary>
 
-- 本地：确认 Clash 已启动，端口多为 `7897`  
-- 服务器：在面板填写订阅并点「更新订阅」，确认混合端口与 `proxy` 一致  
+- 确认 Clash 已启动，混合 / HTTP 端口多为 `7897`  
+- 端口不通时会自动探测本机常见端口，并**验证对方确实是 HTTP 代理**才使用  
+- 探测结果只对本次运行生效，不会覆盖 `config.json` 里手填的 `proxy`  
 </details>
 
 <details>
@@ -222,12 +195,8 @@ grok-register-win/
 <details>
 <summary><b>依赖安装失败</b></summary>
 
-```bash
-# Windows
+```bat
 .venv\Scripts\python.exe -m pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
-
-# Linux
-.venv/bin/python -m pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
 ```
 </details>
 
@@ -240,9 +209,14 @@ grok-register-win/
 <details>
 <summary><b>展开近期版本摘要</b></summary>
 
+### v2.0.1
+- 修复账号文件勾选框不显示对号
+- 面板安全加固：同源校验、移除假的登录功能
+- 代理相关修复：不再无视 `allow_proxy_fallback`、不再偷改 `config.json`
+- 移除服务器版；清理约 1400 行死代码；补上回归测试与 CI
+
 ### v2.0.0
 - 面板 Atelier 风格重做、全中文化
-- 发行附加包：服务器版（内置 mihomo、订阅、仅无头）
 
 ### v1.4.0 ~ v1.3.0
 - 邮箱源调整、上传 SSO 整批续期、下载与面板账号对齐等  

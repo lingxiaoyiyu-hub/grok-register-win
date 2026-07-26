@@ -34,8 +34,6 @@ if not VENV_PY.exists():
 
 PANEL_HOST = os.environ.get("PANEL_HOST", "127.0.0.1")
 PANEL_PORT = int(os.environ.get("PANEL_PORT", "8787"))
-PANEL_AUTH = os.environ.get("PANEL_AUTH", "0").strip() not in ("0", "false", "False", "no", "")
-PANEL_PASSWORD = os.environ.get("PANEL_PASSWORD", "admin")
 
 
 def log(msg: str) -> None:
@@ -51,8 +49,41 @@ def open_port(host: str, port: int, timeout: float = 0.35) -> bool:
         return False
 
 
+def looks_like_http_proxy(host: str, port: int, timeout: float = 1.2) -> bool:
+    """Confirm the port actually speaks HTTP-proxy, not just "something is listening".
+
+    A bare TCP connect only proves *a* service is there. Picking a random local
+    listener (a database, a dev server) as the proxy silently routes registration
+    traffic — including SSO cookies — to the wrong process. Send a real CONNECT
+    and require an HTTP status line back.
+    """
+    try:
+        with socket.create_connection((host, port), timeout=timeout) as s:
+            s.settimeout(timeout)
+            s.sendall(
+                b"CONNECT api.x.ai:443 HTTP/1.1\r\n"
+                b"Host: api.x.ai:443\r\n"
+                b"Proxy-Connection: keep-alive\r\n\r\n"
+            )
+            head = s.recv(64)
+    except Exception:
+        return False
+    if not head.startswith(b"HTTP/"):
+        return False
+    # 200 = tunnel open; 403/407/502 = it IS a proxy, just refused this target.
+    try:
+        code = int(head.split(b" ", 2)[1])
+    except Exception:
+        return False
+    return code in (200, 403, 405, 407, 502)
+
+
 def detect_local_proxy(preferred: str = "") -> str:
-    """If preferred proxy port is down, probe common Clash ports (Verge often uses 7897)."""
+    """Resolve the proxy to use for this run.
+
+    The result is intentionally NOT written back to config.json: probing used to
+    overwrite whatever the user had typed there.
+    """
     pref = (preferred or "").strip()
     if pref:
         u = urlparse(pref if "://" in pref else "http://" + pref)
@@ -60,9 +91,12 @@ def detect_local_proxy(preferred: str = "") -> str:
         port = u.port or 7890
         if open_port(host, port):
             return pref if "://" in pref else f"http://{host}:{port}"
+        log(f"[!] 配置里的代理 {pref} 端口不通，尝试探测本机常见 Clash 端口")
     for port in (7897, 7890, 7891, 7892, 10809, 20171, 1080, 2080, 8888):
-        if open_port("127.0.0.1", port):
-            return f"http://127.0.0.1:{port}"
+        if looks_like_http_proxy("127.0.0.1", port):
+            found = f"http://127.0.0.1:{port}"
+            log(f"[*] 探测到可用 HTTP 代理: {found}（仅本次生效，未写入 config.json）")
+            return found
     return pref or "http://127.0.0.1:7897"
 
 
@@ -146,7 +180,10 @@ def wait_health(timeout: float = 25.0) -> bool:
                 if resp.status == 200:
                     return True
         except Exception:
-            time.sleep(0.3)
+            pass
+        # sleep 必须在循环末尾：原来只在 except 分支里 sleep，
+        # 面板返回非 200 时会变成不间断的忙轮询。
+        time.sleep(0.3)
     return False
 
 
@@ -168,23 +205,17 @@ def _main_impl() -> int:
     ensure_dirs()
     _apply_playwright_patch()
     cfg = ensure_config()
-    proxy = detect_local_proxy(str(cfg.get("proxy") or "").strip())
-    if proxy and cfg.get("proxy") != proxy:
-        cfg["proxy"] = proxy
-        try:
-            save_config(cfg)
-            log(f"[*] proxy auto-updated to {proxy} (saved config.json)")
-        except Exception as e:
-            log(f"[!] save config failed: {e}")
+    configured_proxy = str(cfg.get("proxy") or "").strip()
+    proxy = detect_local_proxy(configured_proxy)
+    if proxy and configured_proxy and proxy != configured_proxy:
+        log(f"[*] 本次使用探测到的代理 {proxy}（config.json 仍保留 {configured_proxy}）")
+        log("    如需固定，请手动修改 config.json 的 proxy 字段")
 
     log("========== Grok Register Win ==========")
     log(f"Dir: {ROOT}")
     log(f"Python: {python_bin()}")
     log(f"Proxy: {proxy}")
-    if PANEL_AUTH:
-        log(f"Panel: http://{PANEL_HOST}:{PANEL_PORT}  password: {PANEL_PASSWORD}")
-    else:
-        log(f"Panel: http://{PANEL_HOST}:{PANEL_PORT}  (no password, local only)")
+    log(f"Panel: http://{PANEL_HOST}:{PANEL_PORT}  (local only)")
     log("Use your own Clash for subscription/nodes. This app does not embed Clash.")
     log("======================================")
     check_proxy(proxy)
@@ -194,7 +225,6 @@ def _main_impl() -> int:
     env["GROK_PROXY"] = proxy
     env["PANEL_HOST"] = PANEL_HOST
     env["PANEL_PORT"] = str(PANEL_PORT)
-    env["PANEL_PASSWORD"] = PANEL_PASSWORD
     env["SSO2CPA_PATH"] = str(ROOT / "lib")
     env["CPA_DIR"] = str(ROOT / "data" / "cpa")
     env["PANEL_LOG_DIR"] = str(ROOT / "data" / "logs")
@@ -223,6 +253,12 @@ def _main_impl() -> int:
         stdout=boot_f,
         stderr=subprocess.STDOUT,
     )
+    # 子进程已经继承了这个 fd，父进程这边可以关掉，避免句柄一直泄漏
+    if boot_f is not subprocess.DEVNULL:
+        try:
+            boot_f.close()
+        except Exception:
+            pass
 
     if wait_health(25.0):
         url = f"http://{PANEL_HOST}:{PANEL_PORT}/"

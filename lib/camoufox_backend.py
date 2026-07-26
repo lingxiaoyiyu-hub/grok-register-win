@@ -472,7 +472,6 @@ def _click_turnstile_on_page(page) -> dict:
 
     for meta in ordered:
         frame = meta["frame"]
-        url = meta.get("url") or ""
         prefer = is_turnstile_frame(meta)
         if not prefer and turnstile_frames:
             # If we already know a turnstile frame exists, don't spam-click main page frames
@@ -751,7 +750,7 @@ class _BrowserWorker:
 
             last_exc = None
             fetched_binary = False
-            for attempt in range(3):
+            for _attempt in range(3):
                 try:
                     # Ensure no running loop on worker thread before Sync launch
                     try:

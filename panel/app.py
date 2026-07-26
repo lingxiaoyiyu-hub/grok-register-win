@@ -12,6 +12,7 @@ import queue
 import re
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -22,7 +23,7 @@ import urllib.parse
 import urllib.request
 import zipfile
 from collections import deque
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 # Ensure stdout/stderr use UTF-8 on Windows (default is GBK/CP936)
@@ -38,25 +39,19 @@ from flask import (
     Flask,
     Response,
     jsonify,
-    redirect,
     render_template_string,
     request,
     send_file,
-    session,
-    url_for,
 )
 
 # Project root = parent of panel/ (Windows / portable layout)
 _DEFAULT_ROOT = Path(__file__).resolve().parent.parent
 BASE_DIR = Path(os.environ.get("GROK_REGISTER_DIR", str(_DEFAULT_ROOT))).resolve()
-# 面板默认不设登录密码（本机 127.0.0.1）。若需开启：PANEL_AUTH=1 且 PANEL_PASSWORD=xxx
-PANEL_AUTH = os.environ.get("PANEL_AUTH", "0").strip() not in ("0", "false", "False", "no", "")
-PANEL_PASSWORD = os.environ.get("PANEL_PASSWORD", "admin")
+# 面板是纯本机工具，只监听回环地址，不提供登录功能。
+# （旧版的 PANEL_AUTH/PANEL_PASSWORD/PANEL_SECRET 是假锁：签名密钥硬编码在源码里，
+#  任何人都能伪造 session 直接进入，已移除。安全性改由「只绑回环 + 同源校验」保证。）
 HOST = os.environ.get("PANEL_HOST", "127.0.0.1")
 PORT = int(os.environ.get("PANEL_PORT", "8787"))
-SECRET = os.environ.get("PANEL_SECRET", "grok-register-panel-local-secret")
-CLASH_API = os.environ.get("CLASH_API", "http://127.0.0.1:9090").rstrip("/")
-CLASH_SECRET = os.environ.get("CLASH_SECRET", "")
 # Prefer project venv; Windows uses Scripts\python.exe
 _VENV_WIN = BASE_DIR / ".venv" / "Scripts" / "python.exe"
 _VENV_UNIX = BASE_DIR / ".venv" / "bin" / "python"
@@ -99,14 +94,6 @@ _workspace_meta: Dict = {
 }
 # Hard wall-clock per register round (one account). Stuck process is killed, next round starts.
 DEFAULT_ROUND_TIMEOUT_SEC = 300
-# Optional: talk to local Clash Meta external-controller for node list.
-# Default: external Clash managed by user; node UI is best-effort.
-ENABLE_CLASH_UI = os.environ.get("ENABLE_CLASH_UI", "1").strip() not in (
-    "0",
-    "false",
-    "False",
-    "no",
-)
 
 # import shared convert core
 for _p in (str(SSO2CPA_PATH), str(BASE_DIR / "lib"), str(Path(__file__).resolve().parent)):
@@ -136,10 +123,92 @@ except Exception as _e:  # pragma: no cover
     _CPA_CORE_OK = False
     _CPA_CORE_ERR = str(_e)
 
-HK_RE = re.compile(r"(香港|Hong\s*Kong|\bHK\b|🇭🇰)", re.I)
-
 app = Flask(__name__)
-app.secret_key = SECRET
+
+
+# --------------- 同源 / DNS-rebinding 防护 ---------------
+# 面板监听在本机，但浏览器里的**任意网页**都能向 127.0.0.1 发请求。
+# 没有防护时，随便逛一个网页就能删掉账号文件、启动任务、替换工作区
+# （multipart 与 text/plain 都属于 CORS「简单请求」，不触发预检）。
+# 两道闸：
+#   1. Host 头白名单 —— 挡住 DNS rebinding（把恶意域名解析到 127.0.0.1）
+#   2. 改状态的请求必须带同源 Origin/Referer —— 挡住跨站伪造请求
+_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+
+
+def _build_allowed_hosts() -> Set[str]:
+    names = {"127.0.0.1", "localhost", "::1", "[::1]"}
+    host = (HOST or "").strip()
+    if host and host not in ("0.0.0.0", "::"):
+        names.add(host)
+    for extra in os.environ.get("PANEL_ALLOWED_HOSTS", "").split(","):
+        extra = extra.strip()
+        if extra:
+            names.add(extra)
+    out: Set[str] = set()
+    for name in names:
+        out.add(name.lower())
+        out.add(f"{name}:{PORT}".lower())
+    return out
+
+
+ALLOWED_HOSTS = _build_allowed_hosts()
+
+
+def _netloc_of(url: str) -> str:
+    try:
+        return urllib.parse.urlsplit(url).netloc.strip().lower()
+    except Exception:
+        return ""
+
+
+@app.before_request
+def _same_origin_guard():
+    host = (request.host or "").strip().lower()
+    if host not in ALLOWED_HOSTS:
+        return (
+            jsonify(
+                {
+                    "ok": False,
+                    "error": f"拒绝的 Host: {request.host}。面板只接受本机访问；"
+                    f"如确需其它主机名，设置 PANEL_ALLOWED_HOSTS=<host> 后重启。",
+                }
+            ),
+            403,
+        )
+    if request.method in _SAFE_METHODS:
+        return None
+    for header in ("Origin", "Referer"):
+        raw = request.headers.get(header, "")
+        if not raw:
+            continue
+        if _netloc_of(raw) == host:
+            return None
+        return (
+            jsonify({"ok": False, "error": f"跨站请求被拒绝（{header}: {raw}）"}),
+            403,
+        )
+    return (
+        jsonify(
+            {
+                "ok": False,
+                "error": "缺少 Origin/Referer，已按跨站请求拒绝。请在面板页面内操作。",
+            }
+        ),
+        403,
+    )
+
+
+def json_body() -> dict:
+    """只接受 Content-Type: application/json 的请求体。
+
+    旧代码用 get_json(force=True)，等于连 text/plain 也照单全收 —— 那种请求
+    在浏览器里属于「简单请求」，可以被任意网站跨站发出。去掉 force 后，
+    跨站 JSON 请求必须先过 CORS 预检，而面板不返回任何 CORS 头。
+    """
+    data = request.get_json(silent=True)
+    return data if isinstance(data, dict) else {}
+
 
 # --------------- job state ---------------
 _job_lock = threading.Lock()
@@ -162,6 +231,8 @@ _job: Dict = {
     "status": "idle",
 }
 _logs: Deque[str] = deque(maxlen=2000)
+_log_lock = threading.Lock()
+_log_seq = 0  # 累计产生过的日志行数，用于前端增量拉取
 _proc: Optional[subprocess.Popen] = None
 
 # --------------- CPA auto-convert queue ---------------
@@ -180,12 +251,20 @@ _cpa_state: Dict = {
 }
 _cpa_done: Set[str] = set()  # sso fingerprints already converted
 _cpa_inflight: Set[str] = set()
+# 工作区代次：上传换票 / 开始注册时 +1。
+# 转换任务会带上入队时的代次，写盘前比对；代次对不上说明工作区已经被整批替换过，
+# 这份结果属于上一批，直接丢弃。否则「归档清空目录」和「worker 正在写文件」
+# 撞在一起时，旧批次的 CPA 会落进新工作区，混进下载包。
+_cpa_generation = 0
 
 
 def log_line(msg: str):
+    global _log_seq
     ts = datetime.now().strftime("%H:%M:%S")
     line = f"[{ts}] {msg}"
-    _logs.append(line)
+    with _log_lock:
+        _logs.append(line)
+        _log_seq += 1
     path = _job.get("log_path")
     if path:
         try:
@@ -193,6 +272,32 @@ def log_line(msg: str):
                 f.write(line + "\n")
         except Exception:
             pass
+
+
+def reset_logs() -> None:
+    global _log_seq
+    with _log_lock:
+        _logs.clear()
+        _log_seq = 0
+
+
+def logs_since(since: int) -> Tuple[List[str], int, bool]:
+    """Return (new_lines, next_cursor, reset).
+
+    /api/job/status is polled every 2s; returning the whole 2000-line buffer
+    each time was ~400KB per poll and forced a full re-render of the log box.
+    `reset=True` means the client must replace its buffer (job restarted, or
+    it fell so far behind that the missing lines already rolled out).
+    """
+    with _log_lock:
+        total = _log_seq
+        buf = list(_logs)
+    first = total - len(buf)  # absolute index of buf[0]
+    # since<=0 也算 reset：此时客户端要么刚打开页面（日志框里还是占位文案），
+    # 要么刚被重置，直接整块替换才不会把占位文本拼进日志。
+    if since <= 0 or since < first or since > total:
+        return buf, total, True
+    return buf[since - first :], total, False
 
 
 # 日志过滤：只保留关键信息，屏蔽第三方库噪音
@@ -283,18 +388,6 @@ def _is_key_log(line: str) -> bool:
             return True
     # 默认过滤（非关键噪音）
     return False
-
-
-def require_login():
-    """默认关闭鉴权；仅当 PANEL_AUTH=1 时校验 session。"""
-    if not PANEL_AUTH:
-        return None
-    if session.get("ok"):
-        return None
-    # API requests get JSON 401
-    if request.path.startswith("/api/"):
-        return jsonify({"ok": False, "error": "unauthorized"}), 401
-    return redirect(url_for("login", next=request.path))
 
 
 def list_account_files() -> List[Path]:
@@ -543,8 +636,10 @@ def prune_orphan_cpa() -> int:
         with _cpa_lock:
             if removed_fps:
                 _cpa_done.difference_update(removed_fps)
-            # recount done roughly by remaining files
-            _cpa_state["ok"] = len(list_cpa_files())
+            # 只把被删掉的那部分从「累计成功数」里扣除。
+            # 原来这里直接赋成当前文件数，把「累计转换成功」和「现存文件数」
+            # 两个语义混成一个字段，面板上的「x成」会莫名跳变。
+            _cpa_state["ok"] = max(0, int(_cpa_state.get("ok") or 0) - removed)
     return removed
 
 
@@ -581,6 +676,7 @@ def enqueue_cpa_convert(
             return False, "already converted or queued"
         _cpa_inflight.add(fp)
         _cpa_state["pending"] = int(_cpa_state.get("pending") or 0) + 1
+        generation = _cpa_generation
     _cpa_q.put(
         {
             "email": email or "",
@@ -589,6 +685,7 @@ def enqueue_cpa_convert(
             "source": source or "",
             "fp": fp,
             "force": force,
+            "generation": generation,
         }
     )
     return True, "queued"
@@ -642,10 +739,18 @@ def _cpa_worker_loop():
         email = item.get("email") or ""
         sso = item.get("sso") or ""
         fp = item.get("fp") or sso_fingerprint(sso)
+        item_gen = item.get("generation", 0)
         with _cpa_lock:
             _cpa_state["running"] = True
             _cpa_state["pending"] = max(0, int(_cpa_state.get("pending") or 0) - 1)
+            stale = item_gen != _cpa_generation
+            if stale:
+                _cpa_inflight.discard(fp)
         try:
+            if stale:
+                # 工作区在本任务排队之后被整批替换过，这份结果属于上一批，丢弃。
+                log_line(f"[CPA] 跳过过期任务（工作区已替换）: {email or fp[:12]}")
+                continue
             if convert_one is None:
                 raise RuntimeError(f"core missing: {_CPA_CORE_ERR}")
             entry = convert_one(sso, email=email, proxy=PROXY_URL)
@@ -654,6 +759,14 @@ def _cpa_worker_loop():
                 entry["password"] = item["password"]
             entry["_source"] = "grok-register-auto-cpa"
             entry["_source_file"] = item.get("source") or ""
+            # convert_one 是一次网络往返，期间工作区可能已被整批替换。写盘前再确认一次。
+            with _cpa_lock:
+                stale = item_gen != _cpa_generation
+                if stale:
+                    _cpa_inflight.discard(fp)
+            if stale:
+                log_line(f"[CPA] 转换完成但工作区已替换，丢弃结果: {email or fp[:12]}")
+                continue
             email_out = entry.get("email") or email or "unknown"
             fname = f"xai-{cpa_safe_filename(email_out)}.json"
             path = CPA_DIR / fname
@@ -783,9 +896,19 @@ def _archive_current_workspace(reason: str = "replace") -> Optional[Path]:
     return None
 
 
+def bump_cpa_generation() -> int:
+    """Invalidate every queued/in-flight convert job. Call before wiping the workspace."""
+    global _cpa_generation
+    with _cpa_lock:
+        _cpa_generation += 1
+        return _cpa_generation
+
+
 def reset_workspace_for_upload(source_name: str, total: int) -> dict:
     """Whole-batch replace: archive old data, clear CPA state, enter upload mode."""
     global _workspace_mode, _workspace_batch, _workspace_meta
+    # 先作废在途任务，再动文件；否则 worker 可能在归档之后把旧批次结果写回来
+    bump_cpa_generation()
     drained = _drain_cpa_queue()
     archived = _archive_current_workspace("upload")
     with _cpa_lock:
@@ -1066,37 +1189,63 @@ def apply_email_config_from_ui(data: dict) -> dict:
     return email_config_public(cfg)
 
 
-def resolve_proxy_url() -> str:
-    """Prefer config.json proxy; auto-probe common Clash ports if dead."""
-    import socket
-    from urllib.parse import urlparse
-
-    def open_port(host: str, port: int, timeout: float = 0.35) -> bool:
-        try:
-            s = socket.create_connection((host, port), timeout=timeout)
-            s.close()
+def _open_port(host: str, port: int, timeout: float = 0.35) -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
             return True
-        except Exception:
-            return False
+    except Exception:
+        return False
+
+
+def _looks_like_http_proxy(host: str, port: int, timeout: float = 1.2) -> bool:
+    """Confirm the port really speaks HTTP-proxy before routing traffic through it.
+
+    A bare TCP connect only proves *something* listens there. Treating an
+    unrelated local service as the proxy silently sends registration traffic
+    (SSO cookies included) to the wrong process.
+    """
+    try:
+        with socket.create_connection((host, port), timeout=timeout) as s:
+            s.settimeout(timeout)
+            s.sendall(
+                b"CONNECT api.x.ai:443 HTTP/1.1\r\n"
+                b"Host: api.x.ai:443\r\n"
+                b"Proxy-Connection: keep-alive\r\n\r\n"
+            )
+            head = s.recv(64)
+    except Exception:
+        return False
+    if not head.startswith(b"HTTP/"):
+        return False
+    try:
+        code = int(head.split(b" ", 2)[1])
+    except Exception:
+        return False
+    return code in (200, 403, 405, 407, 502)
+
+
+def resolve_proxy_url() -> str:
+    """Proxy to use for this run. Never written back to config.json.
+
+    Probing used to overwrite the user's configured `proxy`, so a momentarily
+    dead Clash could permanently replace a hand-typed value.
+    """
+    from urllib.parse import urlparse
 
     preferred = ""
     try:
-        cfg = load_config()
-        preferred = str(cfg.get("proxy") or "").strip()
+        preferred = str(load_config().get("proxy") or "").strip()
     except Exception:
         preferred = ""
     preferred = preferred or os.environ.get("GROK_PROXY", "").strip() or PROXY_URL
 
-    def ok(url: str) -> bool:
-        u = urlparse(url if "://" in url else "http://" + url)
-        return open_port(u.hostname or "127.0.0.1", u.port or 7890)
-
-    if preferred and ok(preferred):
-        return preferred
+    if preferred:
+        u = urlparse(preferred if "://" in preferred else "http://" + preferred)
+        if _open_port(u.hostname or "127.0.0.1", u.port or 7890):
+            return preferred
     for port in (7897, 7890, 7891, 7892, 10809, 20171, 1080, 2080, 8888):
-        url = f"http://127.0.0.1:{port}"
-        if ok(url):
-            return url
+        if _looks_like_http_proxy("127.0.0.1", port):
+            return f"http://127.0.0.1:{port}"
     return preferred or "http://127.0.0.1:7890"
 
 
@@ -1104,124 +1253,14 @@ def save_config(cfg: dict):
     CONFIG_PATH.write_text(
         json.dumps(cfg, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )
-
-
-# --------------- Clash helpers (optional external controller) ---------------
-def clash_request(method: str, path: str, data=None, timeout=15):
-    if not ENABLE_CLASH_UI:
-        raise RuntimeError("clash ui disabled")
-    url = CLASH_API + path
-    body = None if data is None else json.dumps(data).encode()
-    headers = {"Content-Type": "application/json"}
-    if CLASH_SECRET:
-        headers["Authorization"] = f"Bearer {CLASH_SECRET}"
-    req = urllib.request.Request(url, data=body, method=method, headers=headers)
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        raw = resp.read()
-        if not raw:
-            return None
-        return json.loads(raw.decode())
-
-
-def clash_list_nodes() -> dict:
-    """Return usable non-HK leaf nodes + selectors + current."""
+    # config.json 里有邮箱源的管理员令牌/密码，收紧权限（Windows 上是 no-op）
     try:
-        prox = clash_request("GET", "/proxies")["proxies"]
-        cfg = clash_request("GET", "/configs") or {}
-    except Exception as e:
-        return {
-            "ok": False,
-            "error": str(e),
-            "nodes": [],
-            "selectors": {},
-            "hint": "未检测到本机 Clash API。请在自己的 Clash 里选节点；本工具默认走 http://127.0.0.1:7890",
-        }
-
-    leaves = []
-    for name, v in prox.items():
-        t = v.get("type") or ""
-        if t in (
-            "Selector",
-            "URLTest",
-            "Fallback",
-            "LoadBalance",
-            "Relay",
-            "Direct",
-            "Reject",
-            "Compatible",
-            "Pass",
-            "Dns",
-        ):
-            continue
-        if name in ("PASS-RULE", "REJECT-DROP"):
-            continue
-        if HK_RE.search(name):
-            continue
-        leaves.append({"name": name, "type": t})
-
-    # sort by region preference
-    pref = ["US", "JP", "SG", "TW", "MY", "TH", "UK"]
-
-    def key(n):
-        name = n["name"].upper()
-        for i, p in enumerate(pref):
-            if name.startswith(p):
-                return (i, name)
-        return (99, name)
-
-    leaves.sort(key=key)
-
-    selectors = {}
-    for name, v in prox.items():
-        if v.get("type") == "Selector":
-            selectors[name] = {"now": v.get("now"), "all": v.get("all") or []}
-
-    return {
-        "ok": True,
-        "mode": cfg.get("mode"),
-        "nodes": leaves,
-        "selectors": selectors,
-        "global_now": (selectors.get("GLOBAL") or {}).get("now"),
-        "main_now": (selectors.get("🚀 使用节点") or {}).get("now"),
-    }
+        os.chmod(CONFIG_PATH, 0o600)
+    except Exception:
+        pass
 
 
-def clash_set_node(node: str) -> Tuple[bool, str]:
-    if not node:
-        return True, "未指定节点（使用外部 Clash 当前节点）"
-    if not ENABLE_CLASH_UI:
-        return True, "Clash UI 关闭：请在本机 Clash 客户端切换节点"
-    try:
-        # ensure global mode so browser always uses proxy
-        try:
-            clash_request("PATCH", "/configs", {"mode": "global"})
-        except Exception:
-            pass
-        prox = clash_request("GET", "/proxies")["proxies"]
-        set_count = 0
-        for name, v in prox.items():
-            if v.get("type") != "Selector":
-                continue
-            alln = v.get("all") or []
-            if node not in alln:
-                continue
-            try:
-                clash_request(
-                    "PUT",
-                    "/proxies/" + urllib.parse.quote(name, safe=""),
-                    {"name": node},
-                )
-                set_count += 1
-            except Exception as e:
-                log_line(f"[Clash] set {name} fail: {e}")
-        if set_count == 0:
-            return False, f"节点 {node} 不在任何选择器中（也可直接在 Clash 客户端切换）"
-        return True, f"已切换到 {node}（{set_count} 个选择器）"
-    except Exception as e:
-        # soft-fail: external Clash without API is OK
-        return True, f"Clash API 不可用，跳过切换（{e}）；请在客户端自选节点"
-
-
+# --------------- 出口 IP 探测 ---------------
 def clash_exit_ip() -> str:
     try:
         proxy_handler = urllib.request.ProxyHandler(
@@ -1238,15 +1277,6 @@ def clash_exit_ip() -> str:
 
 
 # --------------- job runner ---------------
-def _update_stats_from_log(line: str):
-    if "注册成功" in line or "[+] 注册成功" in line:
-        with _job_lock:
-            _job["success"] = int(_job.get("success") or 0) + 1
-    if "注册失败" in line or "[-] 注册失败" in line:
-        with _job_lock:
-            _job["fail"] = int(_job.get("fail") or 0) + 1
-
-
 def resolve_round_timeout_sec(cfg: Optional[dict] = None) -> int:
     """Per-account wall-clock timeout (seconds). Default 300; clamp 60..3600."""
     for key in ("ROUND_TIMEOUT_SEC", "ROUND_TIMEOUT"):
@@ -1347,21 +1377,11 @@ def _run_one_round(round_no: int, total: int) -> bool:
     else:
         engine = "chromium"
     cfg_run["browser_engine"] = engine
-    # 只把代理/引擎写回；register_count 保持用户原值
-    try:
-        cfg_save = load_config()
-        cfg_save["proxy"] = cfg_run["proxy"]
-        cfg_save["browser_engine"] = engine
-        if "round_timeout_sec" not in cfg_save:
-            cfg_save["round_timeout_sec"] = DEFAULT_ROUND_TIMEOUT_SEC
-        save_config(cfg_save)
-        cfg = cfg_save
-    except Exception:
-        cfg = cfg_run
+    # 探测到的代理只在本轮生效，不写回 config.json（以前会覆盖用户手填的值）。
+    # 引擎是用户在面板上主动选的，由 /api/config/browser 负责持久化，这里不重复写盘。
+    cfg = cfg_run
 
     round_timeout = resolve_round_timeout_sec(cfg)
-    # 子进程强制单账号；用环境变量覆盖，避免改坏 config.json 里的 register_count
-    os.environ["GROK_REGISTER_COUNT"] = "1"
 
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
@@ -1491,7 +1511,6 @@ def _run_one_round(round_no: int, total: int) -> bool:
         log_line(f"[!] 写入 start 失败: {e}")
 
     success = False
-    failed = False
     timed_out = False
     stopped = False
     line_q: "queue.Queue[Optional[str]]" = queue.Queue()
@@ -1548,8 +1567,6 @@ def _run_one_round(round_no: int, total: int) -> bool:
                         log_line(_truncate_line(_strip_inner_timestamp(line)))
                     if "注册成功" in line or "[+] 注册成功" in line:
                         success = True
-                    if "注册失败" in line or "[-] 注册失败" in line:
-                        failed = True
                 break
             continue
 
@@ -1564,11 +1581,6 @@ def _run_one_round(round_no: int, total: int) -> bool:
             log_line(_truncate_line(_strip_inner_timestamp(line)))
         if "注册成功" in line or "[+] 注册成功" in line:
             success = True
-        if "注册失败" in line or "[-] 注册失败" in line:
-            failed = True
-        if "任务结束" in line and ("成功" in line or "失败" in line):
-            # final summary line often has both
-            pass
 
     if _proc is not None and _proc.poll() is None:
         _terminate_register_proc(_proc)
@@ -1599,33 +1611,14 @@ def _run_one_round(round_no: int, total: int) -> bool:
     return False
 
 
-def _next_node(nodes: List[str], index: int) -> Tuple[str, int]:
-    if not nodes:
-        return "", 0
-    index = (index + 1) % len(nodes)
-    return nodes[index], index
-
-
-def job_worker(count: int, node: str = "", node_mode: str = "fixed", node_list: Optional[List[str]] = None):
+def job_worker(count: int):
     """Run register rounds. Node switching is intentionally not managed here —
-    user selects nodes in their own Clash client."""
-    global _job
-    try:
-        with _job_lock:
-            _job["running"] = True
-            _job["stop"] = False
-            _job["status"] = "running"
-            _job["count"] = count
-            _job["success"] = 0
-            _job["fail"] = 0
-            _job["current_round"] = 0
-            _job["node_mode"] = "external"
-            _job["node_list"] = []
-            _job["current_node"] = "external-clash"
-            _job["started_at"] = datetime.now().isoformat(timespec="seconds")
-            _job["finished_at"] = None
-            _job["last_error"] = ""
+    user selects nodes in their own Clash client.
 
+    `running` is already set by start_job() under the lock, so two concurrent
+    /api/job/start calls cannot both get through.
+    """
+    try:
         proxy_now = resolve_proxy_url()
         global PROXY_URL
         PROXY_URL = proxy_now
@@ -1696,25 +1689,43 @@ def job_worker(count: int, node: str = "", node_mode: str = "fixed", node_list: 
             _job["pid"] = None
 
 
-def start_job(count: int, node: str = "", node_mode: str = "fixed") -> Tuple[bool, str]:
-    with _job_lock:
-        if _job.get("running"):
-            return False, "已有任务在运行"
+def start_job(count: int) -> Tuple[bool, str]:
     if count < 1 or count > 500:
         return False, "轮数范围 1-500"
 
     log_path = LOG_DIR / f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+    # 「检查是否在跑」和「置为在跑」必须在同一个临界区里完成。
+    # 分开写会让并发的两次 /api/job/start 都通过检查，起两个 worker
+    # 争抢同一个 _proc，stop 只能停掉其中一个。
     with _job_lock:
+        if _job.get("running"):
+            return False, "已有任务在运行"
+        _job["running"] = True
+        _job["stop"] = False
+        _job["status"] = "running"
+        _job["count"] = count
+        _job["success"] = 0
+        _job["fail"] = 0
+        _job["current_round"] = 0
+        _job["current_node"] = "external-clash"
+        _job["started_at"] = datetime.now().isoformat(timespec="seconds")
+        _job["finished_at"] = None
+        _job["last_error"] = ""
         _job["log_path"] = str(log_path)
-    _logs.clear()
+    reset_logs()
     log_line(f"任务创建：轮数={count} proxy={PROXY_URL}（节点由本机 Clash 管理）")
 
-    th = threading.Thread(
-        target=job_worker,
-        args=(count,),
-        daemon=True,
-    )
-    th.start()
+    th = threading.Thread(target=job_worker, args=(count,), daemon=True)
+    try:
+        th.start()
+    except Exception as e:
+        # 线程没起来就把 running 放回去，否则面板会永远卡在「已有任务在运行」
+        with _job_lock:
+            _job["running"] = False
+            _job["status"] = "idle"
+            _job["last_error"] = str(e)
+        log_line(f"[!] 启动任务线程失败: {e}")
+        return False, f"启动任务线程失败: {e}"
     return True, "已启动"
 
 
@@ -1732,40 +1743,6 @@ def stop_job() -> Tuple[bool, str]:
 
 
 # --------------- HTML ---------------
-LOGIN_HTML = """
-<!doctype html>
-<html lang="zh-CN">
-<head>
-  <meta charset="utf-8"/>
-  <meta name="viewport" content="width=device-width,initial-scale=1"/>
-  <title>登录 · Grok Register</title>
-  <style>
-    :root{--bg:#0b0e14;--card:#141a26;--fg:#eef2fb;--muted:#8b97b0;--line:#222b3d;--accent:#6ea8fe;--accent2:#4f8cff}
-    *{box-sizing:border-box}
-    body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;font-family:system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif;
-      background:radial-gradient(1200px 600px at 20% -10%,#1a2540 0%,transparent 55%),radial-gradient(900px 500px at 80% 100%,#1a1f3a 0%,transparent 50%),var(--bg);color:var(--fg);-webkit-font-smoothing:antialiased}
-    .card{width:min(420px,92vw);background:var(--card);border:1px solid var(--line);border-radius:18px;padding:32px;box-shadow:0 20px 60px rgba(0,0,0,.5)}
-    .brand{display:flex;align-items:center;gap:12px;margin-bottom:6px}
-    .logo{width:40px;height:40px;border-radius:11px;background:#000;display:flex;align-items:center;justify-content:center;font-size:22px;font-weight:900;color:#fff;flex-shrink:0;box-shadow:0 6px 18px rgba(0,0,0,.35);letter-spacing:-1px}
-    h1{margin:0;font-size:22px;font-weight:700} p{margin:6px 0 22px;color:var(--muted);font-size:13.5px}
-    input{width:100%;padding:12px 14px;border-radius:10px;border:1px solid var(--line);background:#0f131c;color:var(--fg);font-size:14px;font-family:inherit;transition:border-color .15s}
-    input:focus{outline:0;border-color:var(--accent);box-shadow:0 0 0 3px rgba(110,168,254,.15)}
-    button{margin-top:16px;width:100%;padding:12px;border:0;border-radius:10px;background:linear-gradient(135deg,var(--accent2),var(--accent));color:#fff;font-weight:600;font-size:14px;cursor:pointer;transition:box-shadow .15s}
-    button:hover{box-shadow:0 6px 18px rgba(79,140,255,.45)}
-    .err{color:#ff8f8f;margin-top:10px;font-size:13px}
-  </style>
-</head>
-<body>
-<form class="card" method="post">
-  <div class="brand"><div class="logo">G</div><h1>Grok Register</h1></div>
-  <p>账号面板 · 启动注册 · 外置 Clash 代理</p>
-  <input type="password" name="password" placeholder="面板密码" autofocus required/>
-  {% if error %}<div class="err">{{ error }}</div>{% endif %}
-  <button type="submit">进入</button>
-</form>
-</body></html>
-"""
-
 INDEX_HTML = r"""
 <!doctype html>
 <html lang="zh-CN">
@@ -1773,18 +1750,16 @@ INDEX_HTML = r"""
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1"/>
   <title>Grok 注册控制台</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,700;12..96,800&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <!-- 字体全部走系统栈：面板是本机工具，外链字体在离线/内网下会阻塞渲染 -->
   <style>
     :root{
       --paper:#f7f4ed;--paper-2:#efebe0;--ink:#1a1a18;--ink-2:#2a2a26;
       --steel:#6b685f;--steel-2:#9a968a;--line:#d8d3c4;
       --rust:#c8351a;--amber:#d98324;--ok:#2f6b2f;
       --log-bg:#1a1a18;--log-fg:#d8d3c4;--log-dim:#9a968a;
-      --font-display:"Bricolage Grotesque","Noto Sans SC",sans-serif;
-      --font-body:"IBM Plex Sans","Noto Sans SC",sans-serif;
-      --font-mono:"IBM Plex Mono","Noto Sans SC",monospace;
+      --font-display:"Segoe UI Variable Display","Segoe UI","Microsoft YaHei UI","PingFang SC","Noto Sans SC",system-ui,sans-serif;
+      --font-body:"Segoe UI","Microsoft YaHei UI","PingFang SC","Noto Sans SC",system-ui,-apple-system,sans-serif;
+      --font-mono:"Cascadia Mono","Consolas","SF Mono","DejaVu Sans Mono",ui-monospace,monospace;
     }
     *{box-sizing:border-box}
     body{margin:0;font-family:var(--font-body);background:var(--paper);color:var(--ink);min-height:100vh;-webkit-font-smoothing:antialiased}
@@ -1834,7 +1809,25 @@ INDEX_HTML = r"""
     input:focus,select:focus{border-color:var(--ink)}
     select{background-image:linear-gradient(45deg,transparent 50%,var(--ink) 50%),linear-gradient(135deg,var(--ink) 50%,transparent 50%);background-position:calc(100% - 16px) 50%,calc(100% - 11px) 50%;background-size:5px 5px;background-repeat:no-repeat;padding-right:30px}
     input[type=number]{font-weight:500}
-    input[type=checkbox]{width:16px;height:16px;min-width:0;appearance:auto;accent-color:var(--rust);cursor:pointer}
+    /* 复选框自绘对号，不依赖浏览器原生控件。
+       原来靠 appearance:auto + accent-color 交给系统画，在部分 Windows 浏览器 /
+       系统主题下勾不显示（issue: 勾选后前面不打勾）。这里用 ::after 自己画，
+       任何内核、任何主题下表现一致。 */
+    input[type=checkbox]{
+      -webkit-appearance:none;appearance:none;
+      width:18px;height:18px;min-width:0;flex:none;margin:0;padding:0;
+      border:1.5px solid var(--steel);border-radius:3px;background:var(--paper);
+      cursor:pointer;vertical-align:middle;position:relative;display:inline-block;
+      transition:background .12s,border-color .12s}
+    input[type=checkbox]:hover{border-color:var(--ink)}
+    input[type=checkbox]:checked{background:var(--rust);border-color:var(--rust)}
+    input[type=checkbox]:checked::after{
+      content:"";position:absolute;left:5px;top:1px;width:5px;height:10px;
+      border:solid #fff;border-width:0 2.5px 2.5px 0;transform:rotate(45deg)}
+    input[type=checkbox]:focus-visible{outline:2px solid var(--ink);outline-offset:1px}
+    /* 整行可点选 + 选中高亮，避免只有 18px 的小方块能点 */
+    tbody tr.selected{background:#f0e6e0}
+    td.chk-cell{cursor:pointer;user-select:none}
     input[type=file]{min-width:200px}
 
     .mail-box{display:none;margin-top:14px;border:1px solid var(--line);padding:14px;background:var(--paper)}
@@ -2100,7 +2093,7 @@ INDEX_HTML = r"""
       <div style="margin-left:auto;display:flex;gap:8px">
         <button class="btn" type="button" onclick="toggleSelectAllFiles(true)">全选</button>
         <button class="btn" type="button" onclick="toggleSelectAllFiles(false)">取消全选</button>
-        <button class="btn danger" type="button" onclick="deleteSelectedFiles()">删除选中</button>
+        <button class="btn danger" type="button" id="btn_del_files" onclick="deleteSelectedFiles()" disabled>删除选中</button>
       </div>
     </div>
     {% if files %}
@@ -2114,7 +2107,7 @@ INDEX_HTML = r"""
       <tbody>
       {% for f in files %}
         <tr>
-          <td><input type="checkbox" class="chk-file" value="{{ f.name }}"/></td>
+          <td class="chk-cell" onclick="onChkCellClick(event, this)"><input type="checkbox" class="chk-file" value="{{ f.name }}" onclick="event.stopPropagation();syncFileSelection()"/></td>
           <td class="mono">{{ f.name }}</td>
           <td><span class="tag">{{ f.count }}</span></td>
           <td class="muted">{{ f.mtime }}</td>
@@ -2268,10 +2261,36 @@ function setEmailHint(text){
   el.style.display=t ? '' : 'none';
 }
 function toggleSelectAllFiles(on){
-  const boxes=document.querySelectorAll('.chk-file');
-  boxes.forEach(b=>{ b.checked=!!on; });
+  document.querySelectorAll('.chk-file').forEach(b=>{ b.checked=!!on; });
+  syncFileSelection();
+}
+// 点击整个单元格（不只是 18px 的小方块）也能切换勾选
+function onChkCellClick(ev, td){
+  const box=td.querySelector('.chk-file');
+  if(!box) return;
+  box.checked=!box.checked;
+  syncFileSelection();
+}
+// 勾选状态 -> 行高亮 + 表头全选框 + 「删除选中」按钮文案，
+// 保证用户一定能看到「选中了几个」，不依赖原生对号是否渲染出来。
+function syncFileSelection(){
+  const boxes=[...document.querySelectorAll('.chk-file')];
+  let n=0;
+  boxes.forEach(b=>{
+    const tr=b.closest('tr');
+    if(tr) tr.classList.toggle('selected', b.checked);
+    if(b.checked) n++;
+  });
   const all=document.getElementById('chk_all_files');
-  if(all) all.checked=!!on;
+  if(all){
+    all.checked = boxes.length>0 && n===boxes.length;
+    all.indeterminate = n>0 && n<boxes.length;
+  }
+  const btn=document.getElementById('btn_del_files');
+  if(btn){
+    btn.textContent = n ? ('删除选中 ('+n+')') : '删除选中';
+    btn.disabled = n===0;
+  }
 }
 async function deleteSelectedFiles(){
   const files=[...document.querySelectorAll('.chk-file:checked')].map(b=>b.value);
@@ -2360,10 +2379,10 @@ async function uploadSsoConvert(){
     if(btn) btn.disabled=false;
   }
 }
-let lastLogLen=0;
+let logCursor=0;
 async function poll(){
   try{
-    const j=await api('/api/job/status');
+    const j=await api('/api/job/status?since='+logCursor);
     const st=j.job||{};
     const cpa=j.cpa||{};
     const ws=j.workspace||{};
@@ -2397,17 +2416,26 @@ async function poll(){
       document.getElementById('upload_hint').textContent =
         '当前模式：'+mode+src+tot+q+okf;
     }
+    if(document.getElementById('st_files')){
+      document.getElementById('st_files').textContent=String(j.files!=null?j.files:0);
+    }
+    // 日志增量追加：只有新行才过来，不再每 2 秒重传整个缓冲区
     const box=document.getElementById('logbox');
     const logs=j.logs||[];
-    if(logs.length!==lastLogLen){
+    if(j.log_reset){
       box.textContent=logs.join('\n');
-      box.scrollTop=box.scrollHeight;
-      lastLogLen=logs.length;
+    }else if(logs.length){
+      box.textContent=(box.textContent?box.textContent+'\n':'')+logs.join('\n');
     }
+    if(j.log_reset||logs.length){
+      box.scrollTop=box.scrollHeight;
+    }
+    if(j.log_cursor!=null) logCursor=j.log_cursor;
   }catch(e){}
 }
 loadEmailConfig();
 loadBrowserEngine();
+syncFileSelection();
 poll();
 setInterval(poll, 2000);
 </script>
@@ -2446,39 +2474,8 @@ pre::-webkit-scrollbar-thumb{background:var(--line);border-radius:4px}
 
 
 # --------------- routes ---------------
-@app.get("/login")
-def login():
-    # 默认无密码：直接进面板
-    if not PANEL_AUTH:
-        return redirect(url_for("index"))
-    if session.get("ok"):
-        return redirect(url_for("index"))
-    return render_template_string(LOGIN_HTML, error=None)
-
-
-@app.post("/login")
-def login_post():
-    if not PANEL_AUTH:
-        return redirect(url_for("index"))
-    if request.form.get("password") == PANEL_PASSWORD:
-        session["ok"] = True
-        return redirect(request.args.get("next") or url_for("index"))
-    return render_template_string(LOGIN_HTML, error="密码错误"), 401
-
-
-@app.get("/logout")
-def logout():
-    session.clear()
-    if not PANEL_AUTH:
-        return redirect(url_for("index"))
-    return redirect(url_for("login"))
-
-
 @app.get("/")
 def index():
-    need = require_login()
-    if need:
-        return need
     files_meta = []
     total = 0
     for p in list_account_files():
@@ -2516,9 +2513,6 @@ def safe_name(name: str) -> Optional[Path]:
 
 @app.get("/preview/<name>")
 def preview_file(name: str):
-    need = require_login()
-    if need:
-        return need
     path = safe_name(name)
     if not path:
         return "文件不存在", 404
@@ -2531,9 +2525,6 @@ def preview_file(name: str):
 
 @app.get("/download/<name>")
 def download_file(name: str):
-    need = require_login()
-    if need:
-        return need
     path = safe_name(name)
     if not path:
         return "文件不存在", 404
@@ -2558,9 +2549,6 @@ def _merged_sso_txt() -> str:
 @app.get("/download/sso.txt")
 def download_sso_txt():
     """主接口 1：全部 SSO，格式 email----password----sso"""
-    need = require_login()
-    if need:
-        return need
     body = _merged_sso_txt()
     fname = f"sso_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
     return Response(
@@ -2578,9 +2566,6 @@ def download_merged():
 
 @app.get("/download/all.zip")
 def download_zip():
-    need = require_login()
-    if need:
-        return need
     buf = io.BytesIO()
     files = list_account_files()
     with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
@@ -2608,9 +2593,6 @@ def download_zip():
 @app.get("/download/accounts.json")
 def download_accounts_json():
     """All accounts as one JSON array (email/password/sso)."""
-    need = require_login()
-    if need:
-        return need
     accounts = unique_accounts()
     body = json.dumps(accounts, ensure_ascii=False, indent=2) + "\n"
     fname = f"accounts_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
@@ -2624,9 +2606,6 @@ def download_accounts_json():
 @app.get("/download/cpa.zip")
 def download_cpa_zip():
     """主接口 2：当前面板账号对应的 CPA JSON（auth_kind=oauth）。"""
-    need = require_login()
-    if need:
-        return need
     # 只打包面板当前账号对应的 CPA，删掉的不会再进包
     files = list_active_cpa_files()
     buf = io.BytesIO()
@@ -2703,7 +2682,7 @@ def _fallback_sub2_payload(cpa_entries: List[dict], name_hints: List[str]) -> di
         name = hint or email or sub or "grok-oauth"
         expires_at = str(cpa.get("expires_at") or cpa.get("expired") or "").strip()
         if not expires_at:
-            expires_at = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+            expires_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         creds = {
             "access_token": access,
             "expires_at": expires_at,
@@ -2731,7 +2710,7 @@ def _fallback_sub2_payload(cpa_entries: List[dict], name_hints: List[str]) -> di
     return {
         "type": "sub2api-data",
         "version": 1,
-        "exported_at": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "exported_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "proxies": [],
         "accounts": accounts,
     }
@@ -2759,7 +2738,7 @@ def _sub2_package(accounts: List[dict]) -> dict:
     return {
         "type": "sub2api-data",
         "version": 1,
-        "exported_at": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "exported_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "proxies": [],
         "accounts": accounts,
     }
@@ -2793,9 +2772,6 @@ def download_sub2_zip():
       all.json        — 全部账号合集（推荐一键导入）
       EMPTY.txt       — 无账号时的说明
     """
-    need = require_login()
-    if need:
-        return need
     cpa_entries, name_hints = _load_cpa_entries_for_sub2()
     accounts = _build_sub2_accounts(cpa_entries, name_hints)
 
@@ -2849,9 +2825,6 @@ def download_sub2_zip():
 @app.get("/download/sub2.json")
 def download_sub2_json():
     """兼容旧链接：返回 all 合集 JSON（等同 zip 内 all.json）。"""
-    need = require_login()
-    if need:
-        return need
     cpa_entries, name_hints = _load_cpa_entries_for_sub2()
     accounts = _build_sub2_accounts(cpa_entries, name_hints)
     payload = _sub2_package(accounts)
@@ -2866,9 +2839,6 @@ def download_sub2_json():
 
 @app.get("/download/grok2api.json")
 def download_grok2api_json():
-    need = require_login()
-    if need:
-        return need
     body = (
         json.dumps(to_grok2api_pool(unique_accounts()), ensure_ascii=False, indent=2)
         + "\n"
@@ -2883,9 +2853,6 @@ def download_grok2api_json():
 
 @app.get("/api/accounts")
 def api_accounts():
-    need = require_login()
-    if need:
-        return need
     data = []
     for source, line in collect_all_accounts():
         info = parse_line(line)
@@ -2900,36 +2867,10 @@ def api_accounts():
     )
 
 
-@app.get("/api/nodes")
-def api_nodes():
-    need = require_login()
-    if need:
-        return need
-    return jsonify(clash_list_nodes())
-
-
-@app.post("/api/nodes/select")
-def api_nodes_select():
-    need = require_login()
-    if need:
-        return need
-    data = request.get_json(force=True, silent=True) or {}
-    node = str(data.get("node") or "").strip()
-    if not node:
-        return jsonify({"ok": False, "error": "node required"}), 400
-    ok, msg = clash_set_node(node)
-    if not ok:
-        return jsonify({"ok": False, "error": msg}), 400
-    return jsonify({"ok": True, "message": msg, "exit": clash_exit_ip()})
-
-
 @app.post("/api/accounts/delete")
 def api_accounts_delete():
     """Delete selected accounts_*.txt and prune matching CPA JSON."""
-    need = require_login()
-    if need:
-        return need
-    data = request.get_json(force=True, silent=True) or {}
+    data = json_body()
     names = data.get("files") or data.get("names") or []
     if isinstance(names, str):
         names = [names]
@@ -2977,18 +2918,12 @@ def api_accounts_delete():
 
 @app.get("/api/config/email")
 def api_get_email_config():
-    need = require_login()
-    if need:
-        return need
     return jsonify({"ok": True, "email": email_config_public()})
 
 
 @app.post("/api/config/email")
 def api_set_email_config():
-    need = require_login()
-    if need:
-        return need
-    data = request.get_json(force=True, silent=True) or {}
+    data = json_body()
     try:
         email = apply_email_config_from_ui(data)
     except Exception as e:
@@ -2998,37 +2933,36 @@ def api_set_email_config():
 
 @app.get("/api/job/status")
 def api_job_status():
-    need = require_login()
-    if need:
-        return need
     with _job_lock:
         job = dict(_job)
+    try:
+        since = int(request.args.get("since", "0"))
+    except Exception:
+        since = 0
+    new_logs, cursor, reset = logs_since(since)
     return jsonify(
         {
             "ok": True,
             "job": job,
-            "logs": list(_logs),
+            "logs": new_logs,
+            "log_cursor": cursor,
+            "log_reset": reset,
             "cpa": cpa_stats(),
             "workspace": workspace_stats(),
             "accounts": len(unique_accounts()),
+            "files": len(list_account_files()),
         }
     )
 
 
 @app.get("/api/cpa/status")
 def api_cpa_status():
-    need = require_login()
-    if need:
-        return need
     return jsonify({"ok": True, "cpa": cpa_stats(), "workspace": workspace_stats()})
 
 
 @app.post("/api/cpa/backfill")
 def api_cpa_backfill():
-    need = require_login()
-    if need:
-        return need
-    data = request.get_json(force=True, silent=True) or {}
+    data = json_body()
     try:
         limit = int(data.get("limit") or 200)
     except Exception:
@@ -3047,9 +2981,6 @@ def api_sso_upload_convert():
 
     Download buttons keep using current workspace only.
     """
-    need = require_login()
-    if need:
-        return need
     if not _CPA_CORE_OK or convert_one is None or parse_uploaded_records is None:
         return jsonify({"ok": False, "error": f"core unavailable: {_CPA_CORE_ERR}"}), 500
     if bool(_job.get("running")):
@@ -3115,9 +3046,6 @@ def _normalize_browser_engine(value: str) -> str:
 
 @app.get("/api/config/browser")
 def api_get_browser_config():
-    need = require_login()
-    if need:
-        return need
     cfg = load_config()
     return jsonify(
         {
@@ -3129,10 +3057,7 @@ def api_get_browser_config():
 
 @app.post("/api/config/browser")
 def api_set_browser_config():
-    need = require_login()
-    if need:
-        return need
-    data = request.get_json(force=True, silent=True) or {}
+    data = json_body()
     eng = _normalize_browser_engine(data.get("browser_engine") or "chromium")
     cfg = load_config()
     cfg["browser_engine"] = eng
@@ -3149,10 +3074,7 @@ def api_set_browser_config():
 
 @app.post("/api/job/start")
 def api_job_start():
-    need = require_login()
-    if need:
-        return need
-    data = request.get_json(force=True, silent=True) or {}
+    data = json_body()
     try:
         count = int(data.get("count") or 1)
     except Exception:
@@ -3164,6 +3086,7 @@ def api_job_start():
         save_config(cfg)
     # 从上传模式切到注册：整批归档清空，避免和注册号混在一起
     if _workspace_mode == "upload":
+        bump_cpa_generation()
         _drain_cpa_queue()
         arch = _archive_current_workspace("register-start")
         with _cpa_lock:
@@ -3188,9 +3111,6 @@ def api_job_start():
 
 @app.post("/api/job/stop")
 def api_job_stop():
-    need = require_login()
-    if need:
-        return need
     ok, msg = stop_job()
     if not ok:
         return jsonify({"ok": False, "error": msg}), 400
